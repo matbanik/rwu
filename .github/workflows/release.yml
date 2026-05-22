@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify version matches script
+        run: |
+          SCRIPT_VER=$(grep -oP 'set "ver=\K[0-9]+\.[0-9]+\.[0-9]+' Reset_WindowsUpdate.cmd)
+          TAG_VER="${{ steps.version.outputs.version }}"
+          if [ "$SCRIPT_VER" != "$TAG_VER" ]; then
+            echo "::error::Version mismatch! Script says $SCRIPT_VER but tag is v$TAG_VER"
+            echo "Run: .\bump.ps1 $TAG_VER"
+            exit 1
+          fi
+          echo "✅ Version verified: $SCRIPT_VER"
+
+      - name: Compute SHA256 checksum
+        id: hash
+        run: |
+          HASH=$(sha256sum Reset_WindowsUpdate.cmd | awk '{print $1}' | tr '[:lower:]' '[:upper:]')
+          echo "sha256=$HASH" >> "$GITHUB_OUTPUT"
+          echo "SHA256: $HASH"
+
+      - name: Generate release body
+        id: body
+        run: |
+          cat > release_body.md << 'HEADER'
+          ## Quick Start
+
+          ```powershell
+          irm https://matbanik.info/rwu | iex
+          ```
+
+          Or download `Reset_WindowsUpdate.cmd` below → right-click → **Run as administrator**.
+
+          ## Integrity
+
+          HEADER
+
+          echo "| File | SHA256 |" >> release_body.md
+          echo "|------|--------|" >> release_body.md
+          echo "| \`Reset_WindowsUpdate.cmd\` | \`${{ steps.hash.outputs.sha256 }}\` |" >> release_body.md
+
+          cat >> release_body.md << 'FOOTER'
+
+          Verify after download:
+          ```powershell
+          (Get-FileHash .\Reset_WindowsUpdate.cmd -Algorithm SHA256).Hash
+          ```
+
+          > The `irm | iex` launcher automatically verifies this hash before execution.
+
+          SHA256: $HASH_PLACEHOLDER
+
+          ---
+          FOOTER
+
+          # Replace placeholder with actual hash (the launcher regex looks for "SHA256: <64hex>")
+          sed -i "s/\$HASH_PLACEHOLDER/${{ steps.hash.outputs.sha256 }}/" release_body.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "RWU v${{ steps.version.outputs.version }}"
+          body_path: release_body.md
+          files: Reset_WindowsUpdate.cmd
+          generate_release_notes: true
+          append_body: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

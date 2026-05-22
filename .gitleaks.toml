@@ -1,0 +1,18 @@
+# Gitleaks Configuration for RWU
+# Documentation: https://github.com/gitleaks/gitleaks
+
+title = "Gitleaks Configuration for RWU"
+
+# Use default rules
+[extend]
+useDefault = true
+
+# Files to allow (reduce false positives)
+[allowlist]
+description = "Allowlisted files and patterns"
+paths = [
+    '''\.gitleaks\.toml$''',
+    '''\.pre-commit-config\.yaml$''',
+    '''\.gitignore$''',
+    '''\.md$''',
+]
