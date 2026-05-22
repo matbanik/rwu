@@ -12,13 +12,14 @@
 
 ## Quick Start
 
-**Copy** → **Open PowerShell** → **Paste In** → **Hit Enter to Run**
+1. Click the **Start Menu**, type **PowerShell**, and open it.
+2. Copy and paste the code below and press **Enter**.
 
-<div align="center">
+```powershell
 
-### `irm https://matbanik.info/rwu | iex`
+irm https://matbanik.info/rwu | iex
 
-</div>
+```
 
 Or [download from Releases](https://github.com/matbanik/rwu/releases) → right-click → **Run as administrator**.
 
