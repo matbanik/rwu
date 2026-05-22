@@ -15,13 +15,13 @@ A clear description of what went wrong.
 - **Windows Version**: (run `winver` — e.g., Windows 11 23H2 Build 22631.4169)
 - **Script Version**: (shown in the title bar / help screen — e.g., v1.0.0)
 - **Run Mode**: Interactive / CLI
-- **CLI Arguments** (if applicable): 
+- **CLI Arguments** (if applicable):
 
 ## Steps to Reproduce
 
-1. 
-2. 
-3. 
+1.
+2.
+3.
 
 ## Expected Behavior
 

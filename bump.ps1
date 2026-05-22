@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Updates the version in Reset_WindowsUpdate.cmd, commits the change,
-    creates a signed git tag, and pushes to origin. The tag push triggers
+    creates a git tag, and pushes to origin. The tag push triggers
     the GitHub Actions release workflow.
 
 .PARAMETER Version
@@ -61,7 +61,7 @@ Write-Host ""
 
 # --- Update version in script ---
 $newContent = $content -replace 'set "ver=\d+\.\d+\.\d+"', "set `"ver=$Version`""
-Set-Content -Path $ScriptFile -Value $newContent -NoNewline -Encoding UTF8
+[System.IO.File]::WriteAllText((Resolve-Path $ScriptFile).Path, $newContent, (New-Object System.Text.UTF8Encoding $false))
 
 # Verify the change took effect
 $verify = Get-Content $ScriptFile -Raw
@@ -104,7 +104,7 @@ if ($NoPush) {
 }
 
 # Tag and push
-git tag $tag
+git tag -a $tag -m "Release $tag"
 Write-Host "  Tagged: $tag" -ForegroundColor Green
 
 git push origin main --tags

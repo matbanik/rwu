@@ -14,5 +14,4 @@ paths = [
     '''\.gitleaks\.toml$''',
     '''\.pre-commit-config\.yaml$''',
     '''\.gitignore$''',
-    '''\.md$''',
 ]
