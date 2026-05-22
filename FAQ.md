@@ -109,7 +109,7 @@ These backups remain on disk. After the reset, Windows Update will re-download a
 - **The launcher** (`rwu.ps1`, used by the `irm | iex` one-liner) connects to the GitHub API to download the tool and verify its SHA256 hash — it does not run without a verified release
 - **No binaries installed** — it's a single `.cmd` script
 - **No telemetry** — no usage data is collected or transmitted
-- **No activation changes** — this tool does not touch licensing, product keys, or KMS/MAK settings. For activation issues, see [MAS](https://github.com/massgravel/Microsoft-Activation-Scripts)
+- **No activation changes** — this tool does not touch licensing, product keys, or KMS/MAK settings
 
 ---
 

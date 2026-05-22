@@ -2,7 +2,7 @@
 setlocal EnableDelayedExpansion
 :: ============================================================
 :: Windows Update Reset & Repair Tool - Windows 11
-:: Inspired by MAS (Microsoft Activation Scripts) menu style
+:: Full-screen interactive TUI with color-coded menu and step toggles
 ::
 :: References:
 ::   https://github.com/matbanik/rwu

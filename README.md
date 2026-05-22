@@ -24,7 +24,7 @@ Or [download from Releases](https://github.com/matbanik/rwu/releases) → right-
 | Feature | Details |
 |---------|---------|
 | 🔍 **14-step reset** | Stop services → clear caches → re-register DLLs → restart → verify |
-| 📋 **Interactive menu** | MAS-style TUI with color-coded toggles |
+| 📋 **Interactive menu** | Full-screen TUI with color-coded toggles and step selection |
 | ⚡ **CLI mode** | `/diag`, `/reset`, `/step N` — exit codes `0`/`1`/`2` |
 | 🤖 **AI-ready diagnostics** | Paste the log into ChatGPT, Copilot, or Claude for instant analysis |
 | 🛡️ **Safe by default** | Dangerous steps disabled; require explicit opt-in with confirmation |
@@ -75,7 +75,7 @@ Reset_WindowsUpdate.cmd /help
 - ❌ "Something went wrong" or "Undoing changes" after update
 - ❌ Windows Update missing from Settings
 
-> **Not for activation issues.** This tool only resets update components — no licensing changes. See [MAS](https://github.com/massgravel/Microsoft-Activation-Scripts) for activation.
+> **Not for activation issues.** This tool only resets update components — no licensing or product key changes.
 
 ## Requirements
 

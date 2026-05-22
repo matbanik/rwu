@@ -7,7 +7,7 @@ If you discover a security vulnerability in this project, **please report it res
 ### How to Report
 
 1. **DO NOT** open a public GitHub issue for security vulnerabilities
-2. Email **matbanik@gmail.com** with:
+2. Email **matbanik+rwu@gmail.com** with:
    - Description of the vulnerability
    - Steps to reproduce
    - Potential impact
