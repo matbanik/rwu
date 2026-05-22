@@ -1,0 +1,68 @@
+# Sync rwu.ps1 launcher to matbanik.info/public/rwu
+# Runs after each release so `irm https://matbanik.info/rwu | iex` always
+# serves the latest launcher without manual copy.
+#
+# Requires: MATBANIK_DEPLOY_TOKEN secret (PAT with `contents: write` on matbanik/info repo)
+
+name: Sync Launcher
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:  # manual trigger for testing
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout RWU repo
+        uses: actions/checkout@v4
+
+      - name: Verify rwu.ps1 exists
+        run: |
+          if [ ! -f rwu.ps1 ]; then
+            echo "::error::rwu.ps1 not found in repository root"
+            exit 1
+          fi
+          echo "✅ rwu.ps1 found ($(wc -c < rwu.ps1) bytes)"
+
+      - name: Checkout matbanik.info repo
+        uses: actions/checkout@v4
+        with:
+          repository: matbanik/info
+          token: ${{ secrets.MATBANIK_DEPLOY_TOKEN }}
+          path: matbanik-site
+          sparse-checkout: |
+            public/rwu
+          sparse-checkout-cone-mode: false
+
+      - name: Compare and sync
+        id: sync
+        run: |
+          SOURCE="rwu.ps1"
+          TARGET="matbanik-site/public/rwu"
+
+          # Compare files (ignore if target doesn't exist yet)
+          if [ -f "$TARGET" ] && diff -q "$SOURCE" "$TARGET" > /dev/null 2>&1; then
+            echo "✅ Launcher already in sync — no changes needed"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            mkdir -p "$(dirname "$TARGET")"
+            cp "$SOURCE" "$TARGET"
+            echo "📦 Launcher updated in matbanik.info/public/rwu"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit and push to matbanik.info
+        if: steps.sync.outputs.changed == 'true'
+        working-directory: matbanik-site
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/rwu
+          git commit -m "chore: sync rwu.ps1 launcher from matbanik/rwu@${{ github.ref_name }}"
+          git push
+          echo "✅ Pushed to matbanik/info"
