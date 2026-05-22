@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/rover.webp" alt="Rover — RWU mascot" width="200">
+</p>
+
 # RWU — Reset & Repair Utility for Windows Update
 
 > Open-source Windows Update reset tool featuring comprehensive diagnostics, safe cache cleanup, DLL re-registration, and AI friendly log for analysis in a single script.
