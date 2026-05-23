@@ -85,5 +85,5 @@ Write-Host ""
 Write-Host "  Launching as Administrator (UAC prompt)..." -ForegroundColor Cyan
 Write-Host ""
 
-Start-Process cmd.exe -ArgumentList "/c `"$tmp`"" -Verb RunAs -Wait
+Start-Process $env:ComSpec -ArgumentList "/c `"$tmp`"" -Verb RunAs -Wait
 Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
