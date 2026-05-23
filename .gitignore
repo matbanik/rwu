@@ -8,6 +8,7 @@ research/
 .vscode/
 .idea/
 .agent/
+AGENTS.md
 
 # OS files
 Thumbs.db
