@@ -267,6 +267,24 @@ Describe 'Phase 9 — Diagnostic Findings Counter' {
     It 'DISM repairable is detected as finding' {
         $cmd | Should -Match 'FINDING.*[Cc]omponent store'
     }
+    It 'DISM uses temp file (not whole log) for repairable check' {
+        $cmd | Should -Match '_DISM_TMP'
+        $cmd | Should -Match 'findstr.*repairable.*_DISM_TMP'
+    }
+    It 'DIAG_FINDINGS is reset when returning to main menu' {
+        # The menu return code should reset DIAG_FINDINGS alongside WARN_COUNT/FAIL_COUNT
+        $lines = ($cmd -split "`n")
+        $resetBlock = $lines | Where-Object { $_ -match 'WARN_COUNT=0' -and $_ -notmatch '::' }
+        $resetBlock.Count | Should -BeGreaterOrEqual 1
+        # Find the line index of WARN_COUNT=0 reset and check DIAG_FINDINGS=0 nearby
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match 'WARN_COUNT=0' -and $lines[$i] -notmatch '::' -and $i -gt 100) {
+                $nearby = $lines[($i-2)..($i+3)] -join "`n"
+                $nearby | Should -Match 'DIAG_FINDINGS=0'
+                break
+            }
+        }
+    }
     It 'Pending reboot is detected as finding' {
         $cmd | Should -Match 'FINDING.*[Pp]ending reboot'
     }
@@ -289,6 +307,55 @@ Describe 'Phase 10 — Step 6 reg delete Verification' {
     }
     It 'WARN on reg delete failure' {
         $cmd | Should -Match 'WARN.*reg delete.*failed'
+    }
+    It 'Uses POLICY_EXPORTED flag to protect backup dir' {
+        $cmd | Should -Match 'POLICY_EXPORTED'
+    }
+    It 'Never deletes backup dir when keys were exported' {
+        # Step6End should check POLICY_EXPORTED before rmdir and preserve backup
+        $cmd | Should -Match 'POLICY_EXPORTED.*1'
+        $cmd | Should -Match 'Backup preserved'
+    }
+    It 'Only rmdir when no policies found at all' {
+        # rmdir should only happen in the final else (no keys found)
+        $lines = ($cmd -split "`n")
+        $rmdirIdx = $null
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match 'rmdir.*POLICY_BACKUP_DIR') { $rmdirIdx = $i; break }
+        }
+        $rmdirIdx | Should -Not -BeNullOrEmpty
+        # The rmdir should be inside an else block after checking POLICY_EXPORTED
+        $preceding = $lines[($rmdirIdx-3)..($rmdirIdx)] -join "`n"
+        $preceding | Should -Match 'No WU policies found'
+    }
+    It 'Policy flags initialized before mkdir (mkdir failure safe)' {
+        # POLICY_BACKUP_READY, POLICY_EXPORTED, POLICY_FOUND must be set before mkdir
+        $lines = ($cmd -split "`n")
+        $mkdirIdx = $null
+        $flagIdx = $null
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match 'POLICY_BACKUP_READY=0' -and $null -eq $flagIdx) { $flagIdx = $i }
+            if ($lines[$i] -match 'mkdir.*POLICY_BACKUP_DIR' -and $null -eq $mkdirIdx) { $mkdirIdx = $i }
+        }
+        $flagIdx | Should -Not -BeNullOrEmpty
+        $mkdirIdx | Should -Not -BeNullOrEmpty
+        $flagIdx | Should -BeLessThan $mkdirIdx -Because 'flags must be initialized before mkdir'
+    }
+    It 'Step6End has distinct mkdir-failure branch (POLICY_BACKUP_READY)' {
+        $cmd | Should -Match 'POLICY_BACKUP_READY.*0'
+        $cmd | Should -Match 'backup directory could not be created'
+    }
+    It 'No gpupdate when export succeeded but delete failed' {
+        # The POLICY_EXPORTED=1 branch should NOT run gpupdate
+        $lines = ($cmd -split "`n")
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match 'Backup preserved') {
+                # Check the next few lines do NOT contain gpupdate
+                $next = $lines[($i+1)..($i+3)] -join "`n"
+                $next | Should -Not -Match 'gpupdate' -Because 'gpupdate should not run when no deletion succeeded'
+                break
+            }
+        }
     }
 }
 

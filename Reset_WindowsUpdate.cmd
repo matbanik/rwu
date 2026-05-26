@@ -708,20 +708,23 @@ call :Spin
 
 :: --- 0g: Component Store Health (quick check) ---
 echo --- 0g: Component Store Health --- >> "%LOGFILE%"
-echo   Running DISM CheckHealth (fast, no repair)... >> "%LOGFILE%"
-DISM /Online /Cleanup-Image /CheckHealth >> "%LOGFILE%" 2>&1
+:: Capture DISM output to temp file to avoid scanning the entire appended log
+set "_DISM_TMP=%TEMP%\rwu_dism_%RANDOM%.txt"
+DISM /Online /Cleanup-Image /CheckHealth > "!_DISM_TMP!" 2>&1
 set "_dism_erl=!errorlevel!"
+type "!_DISM_TMP!" >> "%LOGFILE%"
 echo   DISM CheckHealth exit code: !_dism_erl! >> "%LOGFILE%"
 if !_dism_erl! neq 0 (
     echo   FINDING: Component store needs repair >> "%LOGFILE%"
     set /a DIAG_FINDINGS+=1
 )
-:: Also check for "repairable" in output even if exit code is 0
-findstr /I "repairable" "%LOGFILE%" >nul 2>&1
+:: Check only the DISM temp output for "repairable" (not the whole log)
+findstr /I "repairable" "!_DISM_TMP!" >nul 2>&1
 if !errorlevel! equ 0 if !_dism_erl! equ 0 (
     echo   FINDING: Component store is repairable >> "%LOGFILE%"
     set /a DIAG_FINDINGS+=1
 )
+del "!_DISM_TMP!" >nul 2>&1
 echo. >> "%LOGFILE%"
 call :Spin
 
@@ -1013,15 +1016,21 @@ if "!RESET_WU_POLICIES!"=="1" (
     echo ------------------------------------------------------------ >> "%LOGFILE%"
 
     set "POLICY_BACKUP_DIR=%DESKTOP%\WU_PolicyBackup_%TIMESTAMP%"
+    :: Initialize flags BEFORE mkdir so they're always defined at :Step6End
+    :: POLICY_BACKUP_READY = backup dir was created successfully
+    :: POLICY_EXPORTED = at least one key was found and exported (never delete backup dir)
+    :: POLICY_FOUND = at least one key was successfully deleted (run gpupdate)
+    set "POLICY_BACKUP_READY=0"
+    set "POLICY_EXPORTED=0"
+    set "POLICY_FOUND=0"
+
     mkdir "!POLICY_BACKUP_DIR!" >> "%LOGFILE%" 2>&1
     if !errorlevel! neq 0 (
         echo   FAIL: Cannot create backup directory >> "%LOGFILE%"
         set /a FAIL_COUNT+=1
         goto :Step6End
     )
-
-    :: Export existing keys BEFORE deleting (backup) — fail-closed
-    set "POLICY_FOUND=0"
+    set "POLICY_BACKUP_READY=1"
 
     reg query "HKCU\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" >nul 2>&1
     if !errorlevel! equ 0 (
@@ -1035,6 +1044,7 @@ if "!RESET_WU_POLICIES!"=="1" (
                 echo   WARN: reg delete HKCU WU policy failed ^(key may still exist^) >> "%LOGFILE%"
                 set /a WARN_COUNT+=1
             )
+            set "POLICY_EXPORTED=1"
         ) else (
             echo   FAIL: Export failed, skipping delete for safety >> "%LOGFILE%"
             set /a FAIL_COUNT+=1
@@ -1055,6 +1065,7 @@ if "!RESET_WU_POLICIES!"=="1" (
                 echo   WARN: reg delete HKCU CV WU policy failed ^(key may still exist^) >> "%LOGFILE%"
                 set /a WARN_COUNT+=1
             )
+            set "POLICY_EXPORTED=1"
         ) else (
             echo   FAIL: Export failed, skipping delete for safety >> "%LOGFILE%"
             set /a FAIL_COUNT+=1
@@ -1075,6 +1086,7 @@ if "!RESET_WU_POLICIES!"=="1" (
                 echo   WARN: reg delete HKLM WU policy failed ^(key may still exist^) >> "%LOGFILE%"
                 set /a WARN_COUNT+=1
             )
+            set "POLICY_EXPORTED=1"
         ) else (
             echo   FAIL: Export failed, skipping delete for safety >> "%LOGFILE%"
             set /a FAIL_COUNT+=1
@@ -1095,6 +1107,7 @@ if "!RESET_WU_POLICIES!"=="1" (
                 echo   WARN: reg delete HKLM CV WU policy failed ^(key may still exist^) >> "%LOGFILE%"
                 set /a WARN_COUNT+=1
             )
+            set "POLICY_EXPORTED=1"
         ) else (
             echo   FAIL: Export failed, skipping delete for safety >> "%LOGFILE%"
             set /a FAIL_COUNT+=1
@@ -1104,10 +1117,16 @@ if "!RESET_WU_POLICIES!"=="1" (
     )
 
     :Step6End
-    if "!POLICY_FOUND!"=="1" (
+    if "!POLICY_BACKUP_READY!"=="0" (
+        :: mkdir failed — already logged as FAIL, nothing more to do
+        echo   Skipping policy cleanup ^(backup directory could not be created^) >> "%LOGFILE%"
+    ) else if "!POLICY_FOUND!"=="1" (
         echo   Policy backups saved to: !POLICY_BACKUP_DIR! >> "%LOGFILE%"
         echo   Running gpupdate... >> "%LOGFILE%"
         gpupdate /force >> "%LOGFILE%" 2>&1
+    ) else if "!POLICY_EXPORTED!"=="1" (
+        :: Keys were found and exported but delete failed — keep backup dir, skip gpupdate
+        echo   WARN: Policies were exported but deletion failed. Backup preserved at: !POLICY_BACKUP_DIR! >> "%LOGFILE%"
     ) else (
         echo   No WU policies found - nothing to reset >> "%LOGFILE%"
         rmdir "!POLICY_BACKUP_DIR!" >> "%LOGFILE%" 2>&1
@@ -1505,6 +1524,7 @@ if not defined _AUTOKEYS set "_erl=!errorlevel!"
 if !_erl!==1 (
     set /a WARN_COUNT=0
     set /a FAIL_COUNT=0
+    set /a DIAG_FINDINGS=0
     goto :MainMenu
 )
 
