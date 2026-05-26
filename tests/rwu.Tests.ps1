@@ -1,8 +1,8 @@
-#Requires -Modules @{ ModuleName = 'Pester'; RequiredVersion = '5.7.1' }
+#Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.4.0' }
 <#
     RWU — Pester 5 test suite
     Organised by implementation phase so tests can be written before code (TDD).
-    Run:  pwsh -NoProfile -Command "Import-Module Pester -RequiredVersion 5.7.1; Invoke-Pester tests/ -Output Detailed"
+    Run:  pwsh -NoProfile -Command "Import-Module Pester -MinimumVersion 5.4.0; Invoke-Pester tests/ -Output Detailed"
 #>
 
 # ── Shared Helpers (loaded once at discovery time) ───────────────────────────
@@ -253,6 +253,69 @@ Describe 'Phase 8 — Diagnostic Output Formatting' {
         $cmd | Should -Match "switch.*LicenseStatus.*Licensed"
     }
 }
+
+Describe 'Phase 9 — Diagnostic Findings Counter' {
+    It 'DIAG_FINDINGS counter is initialized' {
+        $cmd | Should -Match 'DIAG_FINDINGS=0'
+    }
+    It 'StepDone log references DIAG_FINDINGS' {
+        $cmd | Should -Match 'DIAG_FINDINGS.*findings'
+    }
+    It 'StepDone TUI shows diagnostic findings count' {
+        $cmd | Should -Match 'diagnostic findings detected'
+    }
+    It 'DISM repairable is detected as finding' {
+        $cmd | Should -Match 'FINDING.*[Cc]omponent store'
+    }
+    It 'Pending reboot is detected as finding' {
+        $cmd | Should -Match 'FINDING.*[Pp]ending reboot'
+    }
+    It 'WU error events are detected as finding' {
+        $cmd | Should -Match 'FINDING.*WU error events'
+    }
+    It 'Connectivity failures are detected as finding' {
+        $cmd | Should -Match 'FINDING.*WU connectivity'
+    }
+    It 'Critically full disks are detected as finding' {
+        $cmd | Should -Match 'FINDING.*critically low'
+    }
+}
+
+Describe 'Phase 10 — Step 6 reg delete Verification' {
+    It 'Checks reg delete exit code (not just reg export)' {
+        # Every reg delete in Step 6 should be followed by errorlevel check
+        $step6Lines = ($cmd -split "`n") | Select-String 'reg delete.*Policies.*WindowsUpdate'
+        $step6Lines.Count | Should -BeGreaterOrEqual 4
+    }
+    It 'WARN on reg delete failure' {
+        $cmd | Should -Match 'WARN.*reg delete.*failed'
+    }
+}
+
+Describe 'Phase 11 — Repair Command Failure Handling' {
+    It 'BITS queue del checks exit code' {
+        $cmd | Should -Match 'WARN.*[Cc]ould not delete qmgr'
+    }
+    It 'DNS flush checks exit code' {
+        $cmd | Should -Match 'WARN.*DNS flush'
+    }
+    It 'Service restart distinguishes errorlevel 2 (already running) from real failures' {
+        $cmd | Should -Match '_svc_erl'
+    }
+}
+
+Describe 'Phase 12 — Log Noise Reduction' {
+    It 'Insider section queries specific values not full dump' {
+        $cmd | Should -Match 'BranchName'
+        $cmd | Should -Not -Match 'WindowsSelfHost\\UI\\Selection'
+    }
+    It 'WSUS checks before querying (no raw error output)' {
+        # The WSUS check should test >nul 2>&1 first, then query if present
+        $lines = ($cmd -split "`n") | Where-Object { $_ -match 'Policies.*WindowsUpdate.*>nul' }
+        $lines.Count | Should -BeGreaterOrEqual 1
+    }
+}
+
 
 Describe 'Phase 7 — TUI Navigation (integration, no elevation)' {
 

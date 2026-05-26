@@ -30,7 +30,7 @@ repos:
     hooks:
       - id: pester-tests
         name: "\U0001F9EA Run Pester tests"
-        entry: pwsh -NoProfile -Command "Import-Module Pester -RequiredVersion 5.7.1; $r = Invoke-Pester tests/ -PassThru -Output Minimal; if ($r.FailedCount -gt 0) { exit 1 }"
+        entry: pwsh -NoProfile -Command "Import-Module Pester -MinimumVersion 5.4.0; $r = Invoke-Pester tests/ -PassThru -Output Minimal; if ($r.FailedCount -gt 0) { exit 1 }"
         language: system
         pass_filenames: false
         always_run: true

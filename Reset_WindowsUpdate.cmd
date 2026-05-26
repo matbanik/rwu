@@ -83,9 +83,11 @@ if not defined TIMESTAMP set "TIMESTAMP=%DATE:~-4%%DATE:~4,2%%DATE:~7,2%-%TIME:~
 if defined TIMESTAMP set "TIMESTAMP=%TIMESTAMP: =0%"
 if not defined TIMESTAMP set "TIMESTAMP=unknown"
 
-:: Failure counter
+:: Failure counter (script execution errors)
 set /a WARN_COUNT=0
 set /a FAIL_COUNT=0
+:: Diagnostic findings counter (system health issues found during scan)
+set /a DIAG_FINDINGS=0
 
 :: ANSI escape character for spinner and screen control
 for /f "delims=" %%a in ('powershell -NoProfile -Command "[char]27"') do set "ESC=%%a"
@@ -670,9 +672,16 @@ call :Spin
 
 :: --- 0c: Insider Program Status ---
 echo --- 0c: Windows Insider Status --- >> "%LOGFILE%"
-reg query "HKLM\SOFTWARE\Microsoft\WindowsSelfHost\Applicability" >> "%LOGFILE%" 2>&1
-if !errorlevel! neq 0 echo   Insider Program: NOT enrolled >> "%LOGFILE%"
-reg query "HKLM\SOFTWARE\Microsoft\WindowsSelfHost\UI\Selection" >> "%LOGFILE%" 2>&1
+reg query "HKLM\SOFTWARE\Microsoft\WindowsSelfHost\Applicability" /v BranchName >nul 2>&1
+if !errorlevel! equ 0 (
+    echo   Insider Program: ENROLLED >> "%LOGFILE%"
+    reg query "HKLM\SOFTWARE\Microsoft\WindowsSelfHost\Applicability" /v BranchName >> "%LOGFILE%" 2>&1
+    reg query "HKLM\SOFTWARE\Microsoft\WindowsSelfHost\Applicability" /v Ring >> "%LOGFILE%" 2>&1
+    reg query "HKLM\SOFTWARE\Microsoft\WindowsSelfHost\Applicability" /v ContentType >> "%LOGFILE%" 2>&1
+    set /a DIAG_FINDINGS+=1
+) else (
+    echo   Insider Program: Not enrolled >> "%LOGFILE%"
+)
 echo. >> "%LOGFILE%"
 call :Spin
 
@@ -692,7 +701,8 @@ call :Spin
 
 :: --- 0f: Disk Space (all drives) ---
 echo --- 0f: Disk Space --- >> "%LOGFILE%"
-powershell -NoProfile -Command "Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Select-Object DeviceID, @{N='SizeGB';E={[math]::Round($_.Size/1GB,1)}}, @{N='FreeGB';E={[math]::Round($_.FreeSpace/1GB,1)}}, @{N='FreePercent';E={[math]::Round($_.FreeSpace/$_.Size*100,1)}} | Format-Table -AutoSize | Out-String -Width 200" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "$disks = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Select-Object DeviceID, @{N='SizeGB';E={[math]::Round($_.Size/1GB,1)}}, @{N='FreeGB';E={[math]::Round($_.FreeSpace/1GB,1)}}, @{N='FreePercent';E={[math]::Round($_.FreeSpace/$_.Size*100,1)}}; $disks | Format-Table -AutoSize | Out-String -Width 200; $crit = $disks | Where-Object { $_.FreePercent -lt 5 }; foreach ($d in $crit) { Write-Output \"  FINDING: $($d.DeviceID) critically low ($($d.FreePercent)%% free)\" }; if ($crit) { exit 1 } else { exit 0 }" >> "%LOGFILE%" 2>&1
+if !errorlevel! neq 0 set /a DIAG_FINDINGS+=1
 echo. >> "%LOGFILE%"
 call :Spin
 
@@ -700,20 +710,36 @@ call :Spin
 echo --- 0g: Component Store Health --- >> "%LOGFILE%"
 echo   Running DISM CheckHealth (fast, no repair)... >> "%LOGFILE%"
 DISM /Online /Cleanup-Image /CheckHealth >> "%LOGFILE%" 2>&1
-echo   DISM CheckHealth exit code: !errorlevel! >> "%LOGFILE%"
+set "_dism_erl=!errorlevel!"
+echo   DISM CheckHealth exit code: !_dism_erl! >> "%LOGFILE%"
+if !_dism_erl! neq 0 (
+    echo   FINDING: Component store needs repair >> "%LOGFILE%"
+    set /a DIAG_FINDINGS+=1
+)
+:: Also check for "repairable" in output even if exit code is 0
+findstr /I "repairable" "%LOGFILE%" >nul 2>&1
+if !errorlevel! equ 0 if !_dism_erl! equ 0 (
+    echo   FINDING: Component store is repairable >> "%LOGFILE%"
+    set /a DIAG_FINDINGS+=1
+)
 echo. >> "%LOGFILE%"
 call :Spin
 
 :: --- 0h: Pending Reboot Check ---
 echo --- 0h: Pending Reboot Flags --- >> "%LOGFILE%"
+set "_reboot_needed=0"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending" >nul 2>&1
-if !errorlevel! equ 0 (echo   CBS RebootPending: YES >> "%LOGFILE%") else (echo   CBS RebootPending: No >> "%LOGFILE%")
+if !errorlevel! equ 0 (echo   CBS RebootPending: YES >> "%LOGFILE%"& set "_reboot_needed=1") else (echo   CBS RebootPending: No >> "%LOGFILE%")
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootInProgress" >nul 2>&1
-if !errorlevel! equ 0 (echo   CBS RebootInProgress: YES >> "%LOGFILE%") else (echo   CBS RebootInProgress: No >> "%LOGFILE%")
+if !errorlevel! equ 0 (echo   CBS RebootInProgress: YES >> "%LOGFILE%"& set "_reboot_needed=1") else (echo   CBS RebootInProgress: No >> "%LOGFILE%")
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired" >nul 2>&1
-if !errorlevel! equ 0 (echo   WU RebootRequired: YES >> "%LOGFILE%") else (echo   WU RebootRequired: No >> "%LOGFILE%")
+if !errorlevel! equ 0 (echo   WU RebootRequired: YES >> "%LOGFILE%"& set "_reboot_needed=1") else (echo   WU RebootRequired: No >> "%LOGFILE%")
 reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager" /v PendingFileRenameOperations >nul 2>&1
-if !errorlevel! equ 0 (echo   PendingFileRename: YES >> "%LOGFILE%") else (echo   PendingFileRename: No >> "%LOGFILE%")
+if !errorlevel! equ 0 (echo   PendingFileRename: YES >> "%LOGFILE%"& set "_reboot_needed=1") else (echo   PendingFileRename: No >> "%LOGFILE%")
+if "!_reboot_needed!"=="1" (
+    echo   FINDING: Pending reboot detected >> "%LOGFILE%"
+    set /a DIAG_FINDINGS+=1
+)
 echo. >> "%LOGFILE%"
 call :Spin
 
@@ -723,14 +749,23 @@ echo   --- AU Settings --- >> "%LOGFILE%"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update" >> "%LOGFILE%" 2>&1
 echo. >> "%LOGFILE%"
 echo   --- WU Server (WSUS) --- >> "%LOGFILE%"
-reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" >> "%LOGFILE%" 2>&1
-if !errorlevel! neq 0 echo   No WSUS/WUfB policy configured ^(OK for home use^) >> "%LOGFILE%"
+reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" >nul 2>&1
+if !errorlevel! equ 0 (
+    echo   WSUS/WUfB policy detected: >> "%LOGFILE%"
+    reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /v WUServer >> "%LOGFILE%" 2>&1
+    reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /v WUStatusServer >> "%LOGFILE%" 2>&1
+    reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /v DisableWindowsUpdateAccess >> "%LOGFILE%" 2>&1
+    set /a DIAG_FINDINGS+=1
+) else (
+    echo   No WSUS/WUfB policy configured ^(OK for home/standard use^) >> "%LOGFILE%"
+)
 echo. >> "%LOGFILE%"
 call :Spin
 
 :: --- 0j: Recent Windows Update Failures (Event Log) ---
 echo --- 0j: Recent WU Failures (last 10, past 30 days) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WindowsUpdateClient'; Level=2,3; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Id, LevelDisplayName, Message -AutoSize -Wrap | Out-String -Width 200 } else { Write-Output '  No WU error events in the last 30 days' }" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WindowsUpdateClient'; Level=2,3; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Id, LevelDisplayName, Message -AutoSize -Wrap | Out-String -Width 200; Write-Output \"  FINDING: $($ev.Count) WU error events in the last 30 days\"; exit 1 } else { Write-Output '  No WU error events in the last 30 days'; exit 0 }" >> "%LOGFILE%" 2>&1
+if !errorlevel! neq 0 set /a DIAG_FINDINGS+=1
 echo. >> "%LOGFILE%"
 call :Spin
 
@@ -742,13 +777,15 @@ call :Spin
 
 :: --- 0k2: Kernel-Power (Event 41) - Unexpected Power Loss / Hard Resets ---
 echo --- 0k2: Unexpected Power Loss / Hard Resets (Event 41, last 10, past 30 days) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Kernel-Power'; Id=41; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Id, @{N='BugcheckCode';E={$_.Properties[0].Value}}, @{N='PowerButtonTimestamp';E={$_.Properties[4].Value}} -AutoSize | Out-String -Width 200 } else { Write-Output '  No Kernel-Power Event 41 in the last 30 days' }" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Kernel-Power'; Id=41; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Id, @{N='BugcheckCode';E={$_.Properties[0].Value}}, @{N='PowerButtonTimestamp';E={$_.Properties[4].Value}} -AutoSize | Out-String -Width 200; Write-Output \"  FINDING: $($ev.Count) unexpected power loss events\"; exit 1 } else { Write-Output '  No Kernel-Power Event 41 in the last 30 days'; exit 0 }" >> "%LOGFILE%" 2>&1
+if !errorlevel! neq 0 set /a DIAG_FINDINGS+=1
 echo. >> "%LOGFILE%"
 call :Spin
 
 :: --- 0k3: Unexpected Shutdown (Event 6008) ---
 echo --- 0k3: Unexpected/Dirty Shutdowns (Event 6008, last 10, past 30 days) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; Id=6008; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Message -AutoSize -Wrap | Out-String -Width 200 } else { Write-Output '  No unexpected shutdown events in the last 30 days' }" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; Id=6008; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Message -AutoSize -Wrap | Out-String -Width 200; Write-Output \"  FINDING: $($ev.Count) unexpected/dirty shutdown events\"; exit 1 } else { Write-Output '  No unexpected shutdown events in the last 30 days'; exit 0 }" >> "%LOGFILE%" 2>&1
+if !errorlevel! neq 0 set /a DIAG_FINDINGS+=1
 echo. >> "%LOGFILE%"
 call :Spin
 
@@ -870,13 +907,23 @@ echo ------------------------------------------------------------ >> "%LOGFILE%"
 
 if exist "%ALLUSERSPROFILE%\Application Data\Microsoft\Network\Downloader\qmgr*.dat" (
     del /f /q "%ALLUSERSPROFILE%\Application Data\Microsoft\Network\Downloader\qmgr*.dat" >> "%LOGFILE%" 2>&1
-    echo   Deleted qmgr data from Application Data >> "%LOGFILE%"
+    if !errorlevel! neq 0 (
+        echo   WARN: Could not delete qmgr data from Application Data >> "%LOGFILE%"
+        set /a WARN_COUNT+=1
+    ) else (
+        echo   Deleted qmgr data from Application Data >> "%LOGFILE%"
+    )
 ) else (
     echo   No qmgr data in Application Data ^(OK^) >> "%LOGFILE%"
 )
 if exist "%ALLUSERSPROFILE%\Microsoft\Network\Downloader\qmgr*.dat" (
     del /f /q "%ALLUSERSPROFILE%\Microsoft\Network\Downloader\qmgr*.dat" >> "%LOGFILE%" 2>&1
-    echo   Deleted qmgr data from ProgramData >> "%LOGFILE%"
+    if !errorlevel! neq 0 (
+        echo   WARN: Could not delete qmgr data from ProgramData >> "%LOGFILE%"
+        set /a WARN_COUNT+=1
+    ) else (
+        echo   Deleted qmgr data from ProgramData >> "%LOGFILE%"
+    )
 ) else (
     echo   No qmgr data in ProgramData ^(OK^) >> "%LOGFILE%"
 )
@@ -982,7 +1029,12 @@ if "!RESET_WU_POLICIES!"=="1" (
         reg export "HKCU\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" "!POLICY_BACKUP_DIR!\HKCU_WU_Policy.reg" /y >> "%LOGFILE%" 2>&1
         if !errorlevel! equ 0 (
             reg delete "HKCU\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /f >> "%LOGFILE%" 2>&1
-            set "POLICY_FOUND=1"
+            if !errorlevel! equ 0 (
+                set "POLICY_FOUND=1"
+            ) else (
+                echo   WARN: reg delete HKCU WU policy failed ^(key may still exist^) >> "%LOGFILE%"
+                set /a WARN_COUNT+=1
+            )
         ) else (
             echo   FAIL: Export failed, skipping delete for safety >> "%LOGFILE%"
             set /a FAIL_COUNT+=1
@@ -997,7 +1049,12 @@ if "!RESET_WU_POLICIES!"=="1" (
         reg export "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" "!POLICY_BACKUP_DIR!\HKCU_CV_WU_Policy.reg" /y >> "%LOGFILE%" 2>&1
         if !errorlevel! equ 0 (
             reg delete "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" /f >> "%LOGFILE%" 2>&1
-            set "POLICY_FOUND=1"
+            if !errorlevel! equ 0 (
+                set "POLICY_FOUND=1"
+            ) else (
+                echo   WARN: reg delete HKCU CV WU policy failed ^(key may still exist^) >> "%LOGFILE%"
+                set /a WARN_COUNT+=1
+            )
         ) else (
             echo   FAIL: Export failed, skipping delete for safety >> "%LOGFILE%"
             set /a FAIL_COUNT+=1
@@ -1012,7 +1069,12 @@ if "!RESET_WU_POLICIES!"=="1" (
         reg export "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" "!POLICY_BACKUP_DIR!\HKLM_WU_Policy.reg" /y >> "%LOGFILE%" 2>&1
         if !errorlevel! equ 0 (
             reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /f >> "%LOGFILE%" 2>&1
-            set "POLICY_FOUND=1"
+            if !errorlevel! equ 0 (
+                set "POLICY_FOUND=1"
+            ) else (
+                echo   WARN: reg delete HKLM WU policy failed ^(key may still exist^) >> "%LOGFILE%"
+                set /a WARN_COUNT+=1
+            )
         ) else (
             echo   FAIL: Export failed, skipping delete for safety >> "%LOGFILE%"
             set /a FAIL_COUNT+=1
@@ -1027,7 +1089,12 @@ if "!RESET_WU_POLICIES!"=="1" (
         reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" "!POLICY_BACKUP_DIR!\HKLM_CV_WU_Policy.reg" /y >> "%LOGFILE%" 2>&1
         if !errorlevel! equ 0 (
             reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" /f >> "%LOGFILE%" 2>&1
-            set "POLICY_FOUND=1"
+            if !errorlevel! equ 0 (
+                set "POLICY_FOUND=1"
+            ) else (
+                echo   WARN: reg delete HKLM CV WU policy failed ^(key may still exist^) >> "%LOGFILE%"
+                set /a WARN_COUNT+=1
+            )
         ) else (
             echo   FAIL: Export failed, skipping delete for safety >> "%LOGFILE%"
             set /a FAIL_COUNT+=1
@@ -1204,6 +1271,10 @@ echo ------------------------------------------------------------ >> "%LOGFILE%"
 echo [STEP 10] DNS Flush - %TIME% >> "%LOGFILE%"
 echo ------------------------------------------------------------ >> "%LOGFILE%"
 ipconfig /flushdns >> "%LOGFILE%" 2>&1
+if !errorlevel! neq 0 (
+    echo   WARN: DNS flush returned !errorlevel! >> "%LOGFILE%"
+    set /a WARN_COUNT+=1
+)
 echo. >> "%LOGFILE%"
 
 call :SpinDone
@@ -1224,8 +1295,12 @@ echo ------------------------------------------------------------ >> "%LOGFILE%"
 for %%s in (cryptSvc bits appidsvc msiserver DoSvc UsoSvc wuauserv TrustedInstaller) do (
     echo   Starting %%s... >> "%LOGFILE%"
     net start %%s >> "%LOGFILE%" 2>&1
-    if !errorlevel! neq 0 (
-        echo     INFO: net start %%s returned !errorlevel! >> "%LOGFILE%"
+    set "_svc_erl=!errorlevel!"
+    if !_svc_erl! neq 0 if !_svc_erl! neq 2 (
+        echo     WARN: net start %%s failed ^(exit !_svc_erl!^) >> "%LOGFILE%"
+        set /a WARN_COUNT+=1
+    ) else if !_svc_erl! equ 2 (
+        echo     INFO: %%s already running >> "%LOGFILE%"
     )
     call :Spin
 )
@@ -1269,11 +1344,19 @@ echo    A pass does not guarantee WU functionality; a fail >> "%LOGFILE%"
 echo    may indicate proxy, firewall, or DNS issues.) >> "%LOGFILE%"
 echo ------------------------------------------------------------ >> "%LOGFILE%"
 
+set "_conn_fail=0"
 echo   Testing connection to Microsoft Update... >> "%LOGFILE%"
-powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'https://update.microsoft.com' -UseBasicParsing -TimeoutSec 15; Write-Output \"  Status: $($r.StatusCode) - OK\" } catch { Write-Output \"  FAILED: $($_.Exception.Message)\" }" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'https://update.microsoft.com' -UseBasicParsing -TimeoutSec 15; Write-Output \"  Status: $($r.StatusCode) - OK\"; exit 0 } catch { Write-Output \"  FAILED: $($_.Exception.Message)\"; exit 1 }" >> "%LOGFILE%" 2>&1
+if !errorlevel! neq 0 set "_conn_fail=1"
 
 echo   Testing connection to Windows Update CDN... >> "%LOGFILE%"
-powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'https://download.windowsupdate.com' -UseBasicParsing -TimeoutSec 15; Write-Output \"  Status: $($r.StatusCode) - OK\" } catch { Write-Output \"  FAILED: $($_.Exception.Message)\" }" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'https://download.windowsupdate.com' -UseBasicParsing -TimeoutSec 15; Write-Output \"  Status: $($r.StatusCode) - OK\"; exit 0 } catch { Write-Output \"  FAILED: $($_.Exception.Message)\"; exit 1 }" >> "%LOGFILE%" 2>&1
+if !errorlevel! neq 0 set "_conn_fail=1"
+
+if "!_conn_fail!"=="1" (
+    echo   FINDING: WU connectivity check failed >> "%LOGFILE%"
+    set /a DIAG_FINDINGS+=1
+)
 echo. >> "%LOGFILE%"
 
 call :SpinDone
@@ -1344,6 +1427,9 @@ if !FAIL_COUNT! gtr 0 (
 ) else (
     echo  COMPLETED SUCCESSFULLY: %DATE% %TIME% >> "%LOGFILE%"
 )
+if !DIAG_FINDINGS! gtr 0 (
+    echo  Diagnostic findings: !DIAG_FINDINGS! ^(review log for FINDING lines^) >> "%LOGFILE%"
+)
 echo. >> "%LOGFILE%"
 echo  Log: %LOGFILE% >> "%LOGFILE%"
 echo ============================================================ >> "%LOGFILE%"
@@ -1356,10 +1442,11 @@ if !FAIL_COUNT! gtr 0 (
     echo  DONE - !FAIL_COUNT! ERRORS, !WARN_COUNT! WARNINGS
 ) else if !WARN_COUNT! gtr 0 (
     echo  DONE - !WARN_COUNT! WARNINGS
-) else if /I "!_STOP_AFTER!"=="Step0" (
-    echo  DONE - NO SCRIPT ERRORS RECORDED. Review log for findings.
 ) else (
     echo  DONE - NO SCRIPT ERRORS RECORDED.
+)
+if !DIAG_FINDINGS! gtr 0 (
+    echo  !DIAG_FINDINGS! diagnostic findings detected. Review log for details.
 )
 echo.
 echo  Log saved to: %LOGFILE%
