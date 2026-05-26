@@ -26,6 +26,11 @@ set "RESET_WU_POLICIES=0"
 set "RESET_SERVICE_SDDL=0"
 :: Set to 1 to enable debug trace logging to Desktop\RWU_Debug.log
 set "DEBUG=0"
+:: Test mode: TUI navigation only, no workloads, no admin required
+set "_TESTMODE=0"
+:: Automated key sequence for testing (comma-separated errorlevel values)
+set "_AUTOKEYS="
+set /a _AUTOKEY_POS=0
 
 :: ============================================================
 :: EARLY HELP CHECK (runs before admin so users can view usage)
@@ -38,19 +43,28 @@ if /I "%~1"=="/?"      goto :ShowHelp
 if /I "%~1"=="-help"   goto :ShowHelp
 if /I "%~1"=="--help"  goto :ShowHelp
 
+:: Early /testmode detection — scan all args before admin check
+:: so testmode can skip elevation requirement
+for %%A in (%*) do (
+    if /I "%%~A"=="/testmode" set "_TESTMODE=1"
+)
+
 :: ============================================================
 :: INITIALIZATION (admin check, log setup, timestamp)
 :: ============================================================
 
 :: Check for admin privileges (fltmc is more reliable than net session)
-fltmc >nul 2>&1
-if %errorlevel% neq 0 (
-    echo.
-    echo *** ERROR: This script must be run as Administrator! ***
-    echo Right-click the file and choose "Run as administrator"
-    echo.
-    if not "%_CLI_MODE%"=="1" pause
-    exit /b 1
+:: Skipped in test mode - TUI navigation only, no system changes
+if not "!_TESTMODE!"=="1" (
+    fltmc >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo.
+        echo *** ERROR: This script must be run as Administrator! ***
+        echo Right-click the file and choose "Run as administrator"
+        echo.
+        if not "!_CLI_MODE!"=="1" pause
+        exit /b 1
+    )
 )
 
 :: Set log file path with fallback
@@ -83,12 +97,14 @@ if "%_CLI_MODE%"=="1" goto :ParseArgs
 
 :: Console window title and size (interactive only)
 title  Windows Update Reset Tool %ver%
-mode con: cols=80 lines=35 >nul 2>&1 || (
-    echo  [WARN] Could not set console size. Layout may vary. >> "%LOGFILE%" 2>nul
+if not "!_TESTMODE!"=="1" (
+    mode con: cols=80 lines=35 >nul 2>&1 || (
+        echo  [WARN] Could not set console size. Layout may vary. >> "%LOGFILE%" 2>nul
+    )
 )
 :: Initialize debug log if enabled
 if "!DEBUG!"=="1" call :DebugInit
-call :Trace "INIT: interactive mode, goto :MainMenu"
+call :Trace "INIT: interactive mode, testmode=!_TESTMODE!, goto :MainMenu"
 goto :MainMenu
 
 :: --- CLI Argument Parsing ---
@@ -121,6 +137,8 @@ if /I "%~1"=="/reset" (
 if /I "%~1"=="/policy"  ( set "RESET_WU_POLICIES=1" & shift & goto :ParseArgsLoop )
 if /I "%~1"=="/sddl"    ( set "RESET_SERVICE_SDDL=1" & shift & goto :ParseArgsLoop )
 if /I "%~1"=="/debug"   ( set "DEBUG=1" & shift & goto :ParseArgsLoop )
+if /I "%~1"=="/testmode" ( set "_TESTMODE=1" & shift & goto :ParseArgsLoop )
+if /I "%~1"=="/autokeys" ( set "_AUTOKEYS=%~2" & shift & shift & goto :ParseArgsLoop )
 if /I "%~1"=="/step" (
     if defined _CLI_ACTION (
         echo ERROR: Conflicting actions: /!_CLI_ACTION! and /step
@@ -165,6 +183,12 @@ if defined _CLI_LOGDIR (
 if "!DEBUG!"=="1" call :DebugInit
 call :Trace "INIT: CLI mode, action=!_CLI_ACTION!"
 if not defined _CLI_ACTION (
+    if "!_TESTMODE!"=="1" (
+        :: No action specified but testmode active - enter interactive TUI
+        call :Trace "INIT: testmode active, no CLI action, entering TUI"
+        set "_CLI_MODE=0"
+        goto :MainMenu
+    )
     echo ERROR: No action specified. Use /diag, /reset, or /step N.
     echo Run with /help for usage.
     endlocal & exit /b 1
@@ -245,11 +269,11 @@ echo:     Dir: !_LOGDIR!
 echo:  ================================================================
 echo.
 call :Trace "MainMenu: waiting for choice"
-choice /C:123456780 /N /M "  Choose an option [1,2,3,4,5,6,7,8,0]: "
-set _erl=!errorlevel!
+call :Choice /C:123456780 /N /M "  Choose an option [1,2,3,4,5,6,7,8,0]: "
+if not defined _AUTOKEYS set "_erl=!errorlevel!"
 call :Trace "MainMenu: choice returned !_erl!"
 
-if !_erl!==9 ( call :Trace "MainMenu: exit" & exit /b )
+if !_erl!==9 ( call :Trace "MainMenu: exit" & endlocal & exit /b 0 )
 if !_erl!==8 ( call :Trace "MainMenu: goto :ToggleDebug" & goto :ToggleDebug )
 if !_erl!==7 ( call :Trace "MainMenu: goto :ShowHelp" & goto :ShowHelp )
 if !_erl!==6 ( call :Trace "MainMenu: goto :ChangeLogFolder" & goto :ChangeLogFolder )
@@ -306,9 +330,10 @@ if "!_CLI_MODE!"=="1" (
     endlocal
     exit /b 0
 )
+call :Trace "ShowHelp: displayed, waiting for keypress"
 echo.
 echo     Press any key to return to Main Menu...
-pause >nul
+if not "!_TESTMODE!"=="1" pause >nul
 goto :MainMenu
 
 :: --- Debug toggle ---
@@ -341,8 +366,9 @@ if "!RESET_WU_POLICIES!"=="0" (
     echo.
     echo  ================================================================
     echo.
-    choice /C:YN /N /M "  Enable WU Policy Reset? [Y/N]: "
-    if !errorlevel!==1 set "RESET_WU_POLICIES=1"
+    call :Choice /C:YN /N /M "  Enable WU Policy Reset? [Y/N]: "
+    if not defined _AUTOKEYS set "_erl=!errorlevel!"
+    if !_erl!==1 set "RESET_WU_POLICIES=1"
 ) else (
     set "RESET_WU_POLICIES=0"
 )
@@ -365,8 +391,9 @@ if "!RESET_SERVICE_SDDL!"=="0" (
     echo.
     echo  ================================================================
     echo.
-    choice /C:YN /N /M "  Enable Service SDDL Reset? [Y/N]: "
-    if !errorlevel!==1 set "RESET_SERVICE_SDDL=1"
+    call :Choice /C:YN /N /M "  Enable Service SDDL Reset? [Y/N]: "
+    if not defined _AUTOKEYS set "_erl=!errorlevel!"
+    if !_erl!==1 set "RESET_SERVICE_SDDL=1"
 ) else (
     set "RESET_SERVICE_SDDL=0"
 )
@@ -377,6 +404,7 @@ goto :MainMenu
 :: ============================================================
 
 :AdvancedMenu
+call :Trace "entering :AdvancedMenu"
 call :BlankScreen
 echo.
 echo:  ================================================================
@@ -418,8 +446,8 @@ echo:       [0]  Back to Main Menu
 echo:
 echo:  ================================================================
 echo.
-choice /C:1234567890A /N /M "  Choose a step [1-9,A,0]: "
-set _erl=!errorlevel!
+call :Choice /C:1234567890A /N /M "  Choose a step [1-9,A,0]: "
+if not defined _AUTOKEYS set "_erl=!errorlevel!"
 
 if !_erl!==11 goto :RunFinalize
 if !_erl!==10 goto :MainMenu
@@ -504,16 +532,26 @@ goto :MainMenu
 :: ============================================================
 
 :DiagnosticsOnly
+call :Trace "entering :DiagnosticsOnly"
 set "_FULLRESET=0"
 set "_STOP_AFTER=Step0"
 set "_RUN_LABEL=Diagnostics Only"
+if "!_TESTMODE!"=="1" (
+    call :Trace "TESTMODE: skip workload, goto :StepDone"
+    goto :StepDone
+)
 call :InitLog
 goto :Step0
 
 :FullReset
+call :Trace "entering :FullReset"
 set "_FULLRESET=1"
 set "_STOP_AFTER=Step14"
 set "_RUN_LABEL=Full WU Reset (standard flow; optional steps by toggle)"
+if "!_TESTMODE!"=="1" (
+    call :Trace "TESTMODE: skip workload, goto :StepDone"
+    goto :StepDone
+)
 call :InitLog
 goto :Step0
 
@@ -544,54 +582,63 @@ exit /b
 :RunStopServices
 set "_STOP_AFTER=Step2"
 set "_RUN_LABEL=Steps 1-2: Record config + Stop services"
+if "!_TESTMODE!"=="1" ( call :Trace "TESTMODE: skip RunStopServices" & goto :StepDone )
 call :InitLog
 goto :Step1
 
 :RunStep3
 set "_STOP_AFTER=Step3"
 set "_RUN_LABEL=Step 3: Delete BITS queue data"
+if "!_TESTMODE!"=="1" ( call :Trace "TESTMODE: skip RunStep3" & goto :StepDone )
 call :InitLog
 goto :Step3
 
 :RunStep4
 set "_STOP_AFTER=Step4"
 set "_RUN_LABEL=Step 4: Rename WU cache folders"
+if "!_TESTMODE!"=="1" ( call :Trace "TESTMODE: skip RunStep4" & goto :StepDone )
 call :InitLog
 goto :Step4
 
 :RunStep5
 set "_STOP_AFTER=Step5"
 set "_RUN_LABEL=Step 5: Reset BITS transfer queue"
+if "!_TESTMODE!"=="1" ( call :Trace "TESTMODE: skip RunStep5" & goto :StepDone )
 call :InitLog
 goto :Step5
 
 :RunStep6
 set "_STOP_AFTER=Step6"
 set "_RUN_LABEL=Step 6: WU policy reset (runs only if toggle ON)"
+if "!_TESTMODE!"=="1" ( call :Trace "TESTMODE: skip RunStep6" & goto :StepDone )
 call :InitLog
 goto :Step6
 
 :RunStep7
 set "_STOP_AFTER=Step7"
 set "_RUN_LABEL=Step 7: Service permissions reset (runs only if toggle ON)"
+if "!_TESTMODE!"=="1" ( call :Trace "TESTMODE: skip RunStep7" & goto :StepDone )
 call :InitLog
 goto :Step7
 
 :RunStep8
 set "_STOP_AFTER=Step8"
 set "_RUN_LABEL=Step 8: Re-register WU DLLs"
+if "!_TESTMODE!"=="1" ( call :Trace "TESTMODE: skip RunStep8" & goto :StepDone )
 call :InitLog
 goto :Step8
 
 :RunNetwork
 set "_STOP_AFTER=Step10"
 set "_RUN_LABEL=Steps 9-10: Reset Winsock + Flush DNS"
+if "!_TESTMODE!"=="1" ( call :Trace "TESTMODE: skip RunNetwork" & goto :StepDone )
 call :InitLog
 goto :Step9
 
 :RunFinalize
 set "_STOP_AFTER=Step14"
 set "_RUN_LABEL=Steps 11-14: Restart services + post-reset checks"
+if "!_TESTMODE!"=="1" ( call :Trace "TESTMODE: skip RunFinalize" & goto :StepDone )
 call :InitLog
 goto :Step11
 
@@ -1282,6 +1329,7 @@ exit /b
 :: DONE - Summary with warning/failure counts
 :: -----------------------------------------------
 :StepDone
+call :Trace "entering :StepDone"
 if not "!_CLI_MODE!"=="1" call :BlankScreen
 echo ============================================================ >> "%LOGFILE%"
 if !FAIL_COUNT! gtr 0 (
@@ -1363,15 +1411,16 @@ echo     [1]  Return to Main Menu
 echo     [0]  Exit
 echo  ================================================================
 echo.
-choice /C:10 /N /M "  Choose [1,0]: "
-if !errorlevel!==1 (
+call :Choice /C:10 /N /M "  Choose [1,0]: "
+if not defined _AUTOKEYS set "_erl=!errorlevel!"
+if !_erl!==1 (
     set /a WARN_COUNT=0
     set /a FAIL_COUNT=0
     goto :MainMenu
 )
 
 endlocal
-exit /b
+exit /b 0
 
 :: -----------------------------------------------
 :: DEBUG / TRACE SUBROUTINES
@@ -1402,4 +1451,39 @@ exit /b
 :: No-op when DEBUG=0 for zero overhead in normal mode.
 if "!DEBUG!"=="0" exit /b
 echo [%TIME%] %~1 >> "!DEBUGLOG!" 2>nul
+exit /b
+
+:Choice
+:: Wrapper around choice.exe. In autokeys mode, pops the next value from
+:: _AUTOKEYS and sets errorlevel. In normal mode, passes all args to choice.
+:: Usage: call :Choice /C:123456780 /N /M "prompt"
+::   Sets: _erl = errorlevel from choice (or from autokeys)
+if not defined _AUTOKEYS (
+    choice %*
+    set "_erl=!errorlevel!"
+    exit /b
+)
+:: Pop next key from _autokeys sequence
+set /a _AUTOKEY_POS+=1
+set "_ak_cur=!_AUTOKEYS!"
+set "_ak_val="
+set /a _ak_idx=1
+:ChoicePop
+:: Extract next comma-delimited value
+for /f "tokens=1* delims=." %%a in ("!_ak_cur!") do (
+    if !_ak_idx! equ !_AUTOKEY_POS! (
+        set "_ak_val=%%a"
+        goto :ChoicePopDone
+    )
+    set "_ak_cur=%%b"
+    set /a _ak_idx+=1
+    if defined _ak_cur goto :ChoicePop
+)
+:ChoicePopDone
+if not defined _ak_val (
+    call :Trace "AUTOKEYS: sequence exhausted at pos !_AUTOKEY_POS!, defaulting to 1"
+    set "_ak_val=1"
+)
+call :Trace "AUTOKEYS: pos=!_AUTOKEY_POS! value=!_ak_val!"
+set "_erl=!_ak_val!"
 exit /b

@@ -193,3 +193,127 @@ Describe 'Phase 6 — Help Text' {
         Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+
+# ── Phase 7: Test Mode + Automated TUI Navigation ──────────────────────────
+
+Describe 'Phase 7 — Test Mode (static analysis)' {
+    BeforeAll { $script:cmd = Get-CmdFileContent }
+
+    It '_TESTMODE=0 is declared' {
+        $cmd | Should -Match 'set\s+"_TESTMODE=0"'
+    }
+    It '/testmode CLI flag is parsed' {
+        $cmd | Should -Match '"/testmode"'
+    }
+    It ':Choice subroutine label exists' {
+        $cmd | Should -Match ':Choice'
+    }
+    It 'Admin check is skipped in testmode' {
+        # The fltmc admin check should be inside a _TESTMODE guard
+        $cmd | Should -Match '_TESTMODE[\s\S]*?fltmc'
+    }
+    It 'Steps are no-ops in testmode' {
+        $cmd | Should -Match ':Step0[\s\S]*?_TESTMODE'
+    }
+    It '/autokeys flag is parsed' {
+        $cmd | Should -Match '"/autokeys"'
+    }
+}
+
+Describe 'Phase 7 — TUI Navigation (integration, no elevation)' {
+
+    Context 'Main Menu → Exit' {
+        BeforeAll {
+            $script:tmpDir = Join-Path $env:TEMP "rwu_tui_exit_$(Get-Random)"
+            New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '9') -LogDir $tmpDir
+        }
+        AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+        It 'Exits with code 0' { $result.ExitCode | Should -Be 0 }
+        It 'Creates debug trace log' {
+            Get-ChildItem $tmpDir -Filter 'RWU_Debug.log' -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+        }
+        It 'Trace log shows MainMenu entry' {
+            $log = Get-Content (Join-Path $tmpDir 'RWU_Debug.log') -Raw -ErrorAction SilentlyContinue
+            $log | Should -Match 'entering :MainMenu'
+        }
+        It 'Trace log shows exit' {
+            $log = Get-Content (Join-Path $tmpDir 'RWU_Debug.log') -Raw -ErrorAction SilentlyContinue
+            $log | Should -Match 'MainMenu: exit'
+        }
+    }
+
+    Context 'Main Menu → Help → Return → Exit' {
+        BeforeAll {
+            $script:tmpDir = Join-Path $env:TEMP "rwu_tui_help_$(Get-Random)"
+            New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '7.9') -LogDir $tmpDir
+        }
+        AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+        It 'Exits with code 0' { $result.ExitCode | Should -Be 0 }
+        It 'Trace log shows ShowHelp' {
+            $log = Get-Content (Join-Path $tmpDir 'RWU_Debug.log') -Raw -ErrorAction SilentlyContinue
+            $log | Should -Match 'ShowHelp'
+        }
+    }
+
+    Context 'Main Menu → Toggle Debug → Exit' {
+        BeforeAll {
+            $script:tmpDir = Join-Path $env:TEMP "rwu_tui_debug_$(Get-Random)"
+            New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '8.9') -LogDir $tmpDir
+        }
+        AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+        It 'Exits with code 0' { $result.ExitCode | Should -Be 0 }
+        It 'Trace log shows ToggleDebug' {
+            $log = Get-Content (Join-Path $tmpDir 'RWU_Debug.log') -Raw -ErrorAction SilentlyContinue
+            $log | Should -Match 'ToggleDebug'
+        }
+    }
+
+    Context 'Main Menu → Advanced → Back → Exit' {
+        BeforeAll {
+            $script:tmpDir = Join-Path $env:TEMP "rwu_tui_adv_$(Get-Random)"
+            New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '3.10.9') -LogDir $tmpDir
+        }
+        AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+        It 'Exits with code 0' { $result.ExitCode | Should -Be 0 }
+        It 'Trace log shows AdvancedMenu' {
+            $log = Get-Content (Join-Path $tmpDir 'RWU_Debug.log') -Raw -ErrorAction SilentlyContinue
+            $log | Should -Match 'AdvancedMenu'
+        }
+        It 'Trace log shows return to MainMenu' {
+            $log = Get-Content (Join-Path $tmpDir 'RWU_Debug.log') -Raw -ErrorAction SilentlyContinue
+            $matches = [regex]::Matches($log, 'entering :MainMenu')
+            $matches.Count | Should -BeGreaterOrEqual 2
+        }
+    }
+
+    Context 'Main Menu → Diagnostics (testmode no-op) → Return → Exit' {
+        BeforeAll {
+            $script:tmpDir = Join-Path $env:TEMP "rwu_tui_diag_$(Get-Random)"
+            New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '1.1.9') -LogDir $tmpDir
+        }
+        AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+        It 'Exits with code 0' { $result.ExitCode | Should -Be 0 }
+        It 'Trace log shows DiagnosticsOnly target' {
+            $log = Get-Content (Join-Path $tmpDir 'RWU_Debug.log') -Raw -ErrorAction SilentlyContinue
+            $log | Should -Match 'DiagnosticsOnly'
+        }
+        It 'Trace log shows TESTMODE skip' {
+            $log = Get-Content (Join-Path $tmpDir 'RWU_Debug.log') -Raw -ErrorAction SilentlyContinue
+            $log | Should -Match 'TESTMODE.*skip'
+        }
+        It 'Trace log shows StepDone' {
+            $log = Get-Content (Join-Path $tmpDir 'RWU_Debug.log') -Raw -ErrorAction SilentlyContinue
+            $log | Should -Match 'StepDone'
+        }
+    }
+}
