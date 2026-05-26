@@ -90,28 +90,28 @@ Describe 'Phase 1 — Launcher (rwu.ps1)' {
 Describe 'Phase 2 — Batch Debug/Trace System' {
     BeforeAll { $script:cmd = Get-CmdFileContent }
 
-    It 'DEBUG=0 is declared in the OPTIONS section' -Skip {
+    It 'DEBUG=0 is declared in the OPTIONS section' {
         $cmd | Should -Match 'set\s+"DEBUG=0"'
     }
-    It 'DEBUGLOG path is set up' -Skip {
+    It 'DEBUGLOG path is set up' {
         $cmd | Should -Match 'set\s+"DEBUGLOG='
     }
-    It '/debug CLI flag is parsed' -Skip {
-        $cmd | Should -Match '/debug'
+    It '/debug CLI flag is parsed' {
+        $cmd | Should -Match '"/debug"'
     }
-    It ':DebugInit label exists' -Skip {
+    It ':DebugInit label exists' {
         $cmd | Should -Match ':DebugInit'
     }
-    It ':Trace label exists' -Skip {
+    It ':Trace label exists' {
         $cmd | Should -Match ':Trace'
     }
-    It ':ToggleDebug label exists' -Skip {
+    It ':ToggleDebug label exists' {
         $cmd | Should -Match ':ToggleDebug'
     }
-    It 'Main menu choice includes key 8' -Skip {
+    It 'Main menu choice includes key 8' {
         $cmd | Should -Match 'choice\s+/C:.*8.*0'
     }
-    It '/help output mentions /debug' -Skip {
+    It '/help output mentions /debug' {
         $cmd | Should -Match '/debug.*Enable debug'
     }
 

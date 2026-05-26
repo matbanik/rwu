@@ -24,6 +24,8 @@ set "ver=1.0.1"
 set "RESET_WU_POLICIES=0"
 :: Set to 1 to reset BITS/WU service security descriptors (Step 7)
 set "RESET_SERVICE_SDDL=0"
+:: Set to 1 to enable debug trace logging to Desktop\RWU_Debug.log
+set "DEBUG=0"
 
 :: ============================================================
 :: EARLY HELP CHECK (runs before admin so users can view usage)
@@ -55,6 +57,7 @@ if %errorlevel% neq 0 (
 set "DESKTOP=%USERPROFILE%\Desktop"
 if not exist "%DESKTOP%" set "DESKTOP=%USERPROFILE%"
 set "LOGFILE=%DESKTOP%\WU_Reset_Log.txt"
+set "DEBUGLOG=%DESKTOP%\RWU_Debug.log"
 
 :: Generate timestamp for backups (PowerShell - wmic is deprecated on Win11)
 for /f "usebackq" %%I in (`powershell -NoProfile -Command "Get-Date -Format 'yyyyMMdd-HHmmss'"`) do set "TIMESTAMP=%%I"
@@ -83,6 +86,9 @@ title  Windows Update Reset Tool %ver%
 mode con: cols=80 lines=35 >nul 2>&1 || (
     echo  [WARN] Could not set console size. Layout may vary. >> "%LOGFILE%" 2>nul
 )
+:: Initialize debug log if enabled
+if "!DEBUG!"=="1" call :DebugInit
+call :Trace "INIT: interactive mode, goto :MainMenu"
 goto :MainMenu
 
 :: --- CLI Argument Parsing ---
@@ -114,6 +120,7 @@ if /I "%~1"=="/reset" (
 )
 if /I "%~1"=="/policy"  ( set "RESET_WU_POLICIES=1" & shift & goto :ParseArgsLoop )
 if /I "%~1"=="/sddl"    ( set "RESET_SERVICE_SDDL=1" & shift & goto :ParseArgsLoop )
+if /I "%~1"=="/debug"   ( set "DEBUG=1" & shift & goto :ParseArgsLoop )
 if /I "%~1"=="/step" (
     if defined _CLI_ACTION (
         echo ERROR: Conflicting actions: /!_CLI_ACTION! and /step
@@ -152,7 +159,11 @@ if defined _CLI_LOGDIR (
         endlocal & exit /b 1
     )
     set "LOGFILE=!_CLI_LOGDIR!\WU_Reset_Log.txt"
+    set "DEBUGLOG=!_CLI_LOGDIR!\RWU_Debug.log"
 )
+:: Initialize debug log if enabled (CLI mode)
+if "!DEBUG!"=="1" call :DebugInit
+call :Trace "INIT: CLI mode, action=!_CLI_ACTION!"
 if not defined _CLI_ACTION (
     echo ERROR: No action specified. Use /diag, /reset, or /step N.
     echo Run with /help for usage.
@@ -189,6 +200,7 @@ endlocal & exit /b 1
 :: ============================================================
 
 :MainMenu
+call :Trace "entering :MainMenu"
 :: Toggle state is read directly below via ANSI-colored labels
 call :BlankScreen
 color 0A
@@ -212,12 +224,15 @@ echo:
 :: Build colored toggle labels (OFF=gray, ON=yellow)
 if "!RESET_WU_POLICIES!"=="1" (set "_WU_COL=!ESC![93m[ON]!ESC![92m") else (set "_WU_COL=!ESC![90m[OFF]!ESC![92m")
 if "!RESET_SERVICE_SDDL!"=="1" (set "_SDDL_COL=!ESC![93m[ON]!ESC![92m") else (set "_SDDL_COL=!ESC![90m[OFF]!ESC![92m")
+if "!DEBUG!"=="1" (set "_DBG_COL=!ESC![93m[ON]!ESC![92m") else (set "_DBG_COL=!ESC![90m[OFF]!ESC![92m")
 <nul set /p "=!ESC![10C[4]  Delete WU policy keys after backup   !_WU_COL!"
 echo.
 <nul set /p "=!ESC![10C[5]  Reset BITS/WU service permissions    !_SDDL_COL!"
 echo.
 echo:          [6]  Change Log Folder
 echo:          [7]  Help
+<nul set /p "=!ESC![10C[8]  Debug trace log                      !_DBG_COL!"
+echo.
 echo:          ________________________________________________________
 echo:
 echo:          [0]  Exit
@@ -229,17 +244,21 @@ echo:     Log: ...\!_LOGNAME!
 echo:     Dir: !_LOGDIR!
 echo:  ================================================================
 echo.
-choice /C:12345670 /N /M "  Choose an option [1,2,3,4,5,6,7,0]: "
+call :Trace "MainMenu: waiting for choice"
+choice /C:123456780 /N /M "  Choose an option [1,2,3,4,5,6,7,8,0]: "
 set _erl=!errorlevel!
+call :Trace "MainMenu: choice returned !_erl!"
 
-if !_erl!==8 exit /b
-if !_erl!==7 goto :ShowHelp
-if !_erl!==6 goto :ChangeLogFolder
-if !_erl!==5 goto :ToggleSDDL
-if !_erl!==4 goto :ToggleWUPolicy
-if !_erl!==3 goto :AdvancedMenu
-if !_erl!==2 goto :FullReset
-if !_erl!==1 goto :DiagnosticsOnly
+if !_erl!==9 ( call :Trace "MainMenu: exit" & exit /b )
+if !_erl!==8 ( call :Trace "MainMenu: goto :ToggleDebug" & goto :ToggleDebug )
+if !_erl!==7 ( call :Trace "MainMenu: goto :ShowHelp" & goto :ShowHelp )
+if !_erl!==6 ( call :Trace "MainMenu: goto :ChangeLogFolder" & goto :ChangeLogFolder )
+if !_erl!==5 ( call :Trace "MainMenu: goto :ToggleSDDL" & goto :ToggleSDDL )
+if !_erl!==4 ( call :Trace "MainMenu: goto :ToggleWUPolicy" & goto :ToggleWUPolicy )
+if !_erl!==3 ( call :Trace "MainMenu: goto :AdvancedMenu" & goto :AdvancedMenu )
+if !_erl!==2 ( call :Trace "MainMenu: goto :FullReset" & goto :FullReset )
+if !_erl!==1 ( call :Trace "MainMenu: goto :DiagnosticsOnly" & goto :DiagnosticsOnly )
+call :Trace "MainMenu: no match, looping"
 goto :MainMenu
 
 :: ============================================================
@@ -264,9 +283,9 @@ echo                                      4    Rename cache folders
 echo  OPTIONS:                            5    Reset BITS queue
 echo   /policy    Enable policy reset     6    Reset WU policies
 echo   /sddl      Enable SDDL reset       7    Reset service SDDL
-echo   /logdir P  Set log folder            8    Re-register DLLs
-echo:  /help /?   This help               9-10 Network reset
-echo                                      11-14 or finalize
+echo   /debug     Enable debug trace log   8    Re-register DLLs
+echo   /logdir P  Set log folder           9-10 Network reset
+echo:  /help /?   This help               11-14 or finalize
 echo  WARNING: /policy and /sddl bypass confirmation prompts.
 echo  They delete registry keys and overwrite service permissions.
 echo.
@@ -290,6 +309,19 @@ if "!_CLI_MODE!"=="1" (
 echo.
 echo     Press any key to return to Main Menu...
 pause >nul
+goto :MainMenu
+
+:: --- Debug toggle ---
+:ToggleDebug
+call :Trace "entering :ToggleDebug"
+if "!DEBUG!"=="0" (
+    set "DEBUG=1"
+    call :DebugInit
+    call :Trace "DEBUG enabled via menu toggle"
+) else (
+    call :Trace "DEBUG disabled via menu toggle"
+    set "DEBUG=0"
+)
 goto :MainMenu
 
 :: --- Toggle with confirmation ---
@@ -1290,3 +1322,35 @@ if !errorlevel!==1 (
 )
 
 endlocal
+exit /b
+
+:: -----------------------------------------------
+:: DEBUG / TRACE SUBROUTINES
+:: -----------------------------------------------
+
+:DebugInit
+:: Initialize the debug log file with a header
+echo. >> "!DEBUGLOG!"
+echo ============================================================ >> "!DEBUGLOG!"
+echo  RWU Debug Trace Log >> "!DEBUGLOG!"
+echo  Started: %DATE% %TIME% >> "!DEBUGLOG!"
+echo  Version: !ver! >> "!DEBUGLOG!"
+echo  CLI Mode: !_CLI_MODE! >> "!DEBUGLOG!"
+echo  ComSpec: %COMSPEC% >> "!DEBUGLOG!"
+echo  Script: %~f0 >> "!DEBUGLOG!"
+echo  CmdLine: %CMDCMDLINE% >> "!DEBUGLOG!"
+echo ============================================================ >> "!DEBUGLOG!"
+if "!_CLI_MODE!"=="0" (
+    echo.
+    echo  [DEBUG] Trace logging enabled: !DEBUGLOG!
+    echo.
+)
+exit /b
+
+:Trace
+:: Write a timestamped trace line to the debug log.
+:: Usage: call :Trace "message"
+:: No-op when DEBUG=0 for zero overhead in normal mode.
+if "!DEBUG!"=="0" exit /b
+echo [%TIME%] %~1 >> "!DEBUGLOG!" 2>nul
+exit /b
