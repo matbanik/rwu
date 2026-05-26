@@ -223,6 +223,15 @@ Describe 'Phase 7 — Test Mode (static analysis)' {
         # the caller always sees errorlevel=0 and no menu option ever matches.
         $cmd | Should -Match ':Choice[\s\S]*?exit /b !_erl!'
     }
+    It '_AUTOKEYS must NOT be pre-initialized (regression)' {
+        # Regression: 'set "_AUTOKEYS="' creates a defined-but-empty variable.
+        # 'if not defined _AUTOKEYS' returns FALSE for empty strings, so :Choice
+        # never calls real choice.exe — menus don't respond to input at all.
+        $cmd | Should -Not -Match 'set\s+"_AUTOKEYS="'
+    }
+    It 'DEBUG defaults to 0' {
+        $cmd | Should -Match 'set\s+"DEBUG=0"'
+    }
 }
 
 Describe 'Phase 7 — TUI Navigation (integration, no elevation)' {

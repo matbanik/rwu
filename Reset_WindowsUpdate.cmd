@@ -25,11 +25,13 @@ set "RESET_WU_POLICIES=0"
 :: Set to 1 to reset BITS/WU service security descriptors (Step 7)
 set "RESET_SERVICE_SDDL=0"
 :: Set to 1 to enable debug trace logging to Desktop\RWU_Debug.log
-set "DEBUG=1"
+set "DEBUG=0"
 :: Test mode: TUI navigation only, no workloads, no admin required
 set "_TESTMODE=0"
-:: Automated key sequence for testing (comma-separated errorlevel values)
-set "_AUTOKEYS="
+:: Automated key sequence for testing (period-separated errorlevel values)
+:: _AUTOKEYS is left UNDEFINED unless /autokeys is passed.
+:: This is critical: :Choice uses 'if not defined _AUTOKEYS' to decide
+:: whether to call real choice.exe or pop from the autokey sequence.
 set /a _AUTOKEY_POS=0
 
 :: ============================================================
