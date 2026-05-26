@@ -24,3 +24,13 @@ repos:
         name: "\U00002702 Trim trailing whitespace"
       - id: detect-private-key
         name: "\U0001F511 Detect private keys"
+
+  # Run Pester tests before commit
+  - repo: local
+    hooks:
+      - id: pester-tests
+        name: "\U0001F9EA Run Pester tests"
+        entry: pwsh -NoProfile -Command "Import-Module Pester -RequiredVersion 5.7.1; $r = Invoke-Pester tests/ -PassThru -Output Minimal; if ($r.FailedCount -gt 0) { exit 1 }"
+        language: system
+        pass_filenames: false
+        always_run: true

@@ -664,7 +664,7 @@ call :Spin
 
 :: --- 0b: Windows Edition and Activation ---
 echo --- 0b: Edition and Activation Status --- >> "%LOGFILE%"
-powershell -NoProfile -Command "Get-CimInstance SoftwareLicensingProduct -Filter 'ApplicationID=''55c92734-d682-4d71-983e-d6ec3f16059f'' AND PartialProductKey IS NOT NULL' | Select-Object Name, LicenseStatus, Description | Format-List" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "Get-CimInstance SoftwareLicensingProduct -Filter 'ApplicationID=''55c92734-d682-4d71-983e-d6ec3f16059f'' AND PartialProductKey IS NOT NULL' | Select-Object Name, @{N='LicenseStatus';E={switch([int]$_.LicenseStatus){0{'Unlicensed'}1{'Licensed'}2{'OOB Grace'}3{'OOT Grace'}4{'Non-Genuine Grace'}5{'Notification'}6{'Extended Grace'}default{$_.LicenseStatus}}}}, Description | Format-List" >> "%LOGFILE%" 2>&1
 echo. >> "%LOGFILE%"
 call :Spin
 
@@ -679,20 +679,20 @@ call :Spin
 :: --- 0d: Hardware - CPU and RAM ---
 echo --- 0d: CPU and Memory --- >> "%LOGFILE%"
 powershell -NoProfile -Command "Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors | Format-List" >> "%LOGFILE%" 2>&1
-powershell -NoProfile -Command "$m = Get-CimInstance Win32_PhysicalMemory; $total = ($m | Measure-Object Capacity -Sum).Sum / 1GB; Write-Output \"  Total RAM: $total GB  Sticks: $($m.Count)\"; $m | Select-Object DeviceLocator, Capacity, Speed, Manufacturer | Format-Table -AutoSize" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "$m = Get-CimInstance Win32_PhysicalMemory; $total = ($m | Measure-Object Capacity -Sum).Sum / 1GB; Write-Output \"  Total RAM: $total GB  Sticks: $($m.Count)\"; $m | Select-Object DeviceLocator, @{N='CapacityGB';E={[math]::Round($_.Capacity/1GB)}}, Speed, Manufacturer | Format-Table -AutoSize | Out-String -Width 200" >> "%LOGFILE%" 2>&1
 echo. >> "%LOGFILE%"
 call :Spin
 
 :: --- 0e: Disk Health (SMART + Reliability) ---
 echo --- 0e: Disk Health --- >> "%LOGFILE%"
-powershell -NoProfile -Command "Get-PhysicalDisk | Select-Object FriendlyName, MediaType, BusType, HealthStatus, OperationalStatus, @{N='SizeGB';E={[math]::Round($_.Size/1GB,1)}} | Format-Table -AutoSize" >> "%LOGFILE%" 2>&1
-powershell -NoProfile -Command "Get-PhysicalDisk | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue | Select-Object DeviceId, ReadErrorsTotal, WriteErrorsTotal, Wear, Temperature, PowerOnHours | Format-Table -AutoSize" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "Get-PhysicalDisk | Select-Object FriendlyName, MediaType, BusType, HealthStatus, OperationalStatus, @{N='SizeGB';E={[math]::Round($_.Size/1GB,1)}} | Format-Table -AutoSize | Out-String -Width 200" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "Get-PhysicalDisk | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue | Select-Object DeviceId, ReadErrorsTotal, WriteErrorsTotal, Wear, Temperature, PowerOnHours | Format-Table -AutoSize | Out-String -Width 200" >> "%LOGFILE%" 2>&1
 echo. >> "%LOGFILE%"
 call :Spin
 
 :: --- 0f: Disk Space (all drives) ---
 echo --- 0f: Disk Space --- >> "%LOGFILE%"
-powershell -NoProfile -Command "Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Select-Object DeviceID, @{N='SizeGB';E={[math]::Round($_.Size/1GB,1)}}, @{N='FreeGB';E={[math]::Round($_.FreeSpace/1GB,1)}}, @{N='FreePercent';E={[math]::Round($_.FreeSpace/$_.Size*100,1)}} | Format-Table -AutoSize" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Select-Object DeviceID, @{N='SizeGB';E={[math]::Round($_.Size/1GB,1)}}, @{N='FreeGB';E={[math]::Round($_.FreeSpace/1GB,1)}}, @{N='FreePercent';E={[math]::Round($_.FreeSpace/$_.Size*100,1)}} | Format-Table -AutoSize | Out-String -Width 200" >> "%LOGFILE%" 2>&1
 echo. >> "%LOGFILE%"
 call :Spin
 
@@ -730,31 +730,31 @@ call :Spin
 
 :: --- 0j: Recent Windows Update Failures (Event Log) ---
 echo --- 0j: Recent WU Failures (last 10, past 30 days) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WindowsUpdateClient'; Level=2,3; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Id, LevelDisplayName, Message -AutoSize -Wrap } else { Write-Output '  No WU error events in the last 30 days' }" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WindowsUpdateClient'; Level=2,3; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Id, LevelDisplayName, Message -AutoSize -Wrap | Out-String -Width 200 } else { Write-Output '  No WU error events in the last 30 days' }" >> "%LOGFILE%" 2>&1
 echo. >> "%LOGFILE%"
 call :Spin
 
 :: --- 0k: Recent System Crashes - Bugchecks (BSODs) ---
 echo --- 0k: Recent Bugchecks / BSODs (last 5, past 30 days) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WER-SystemErrorReporting'; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 5 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Message -AutoSize -Wrap } else { Write-Output '  No bugcheck events in the last 30 days' }" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WER-SystemErrorReporting'; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 5 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Message -AutoSize -Wrap | Out-String -Width 200 } else { Write-Output '  No bugcheck events in the last 30 days' }" >> "%LOGFILE%" 2>&1
 echo. >> "%LOGFILE%"
 call :Spin
 
 :: --- 0k2: Kernel-Power (Event 41) - Unexpected Power Loss / Hard Resets ---
 echo --- 0k2: Unexpected Power Loss / Hard Resets (Event 41, last 10, past 30 days) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Kernel-Power'; Id=41; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Id, @{N='BugcheckCode';E={$_.Properties[0].Value}}, @{N='PowerButtonTimestamp';E={$_.Properties[4].Value}} -AutoSize } else { Write-Output '  No Kernel-Power Event 41 in the last 30 days' }" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Kernel-Power'; Id=41; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Id, @{N='BugcheckCode';E={$_.Properties[0].Value}}, @{N='PowerButtonTimestamp';E={$_.Properties[4].Value}} -AutoSize | Out-String -Width 200 } else { Write-Output '  No Kernel-Power Event 41 in the last 30 days' }" >> "%LOGFILE%" 2>&1
 echo. >> "%LOGFILE%"
 call :Spin
 
 :: --- 0k3: Unexpected Shutdown (Event 6008) ---
 echo --- 0k3: Unexpected/Dirty Shutdowns (Event 6008, last 10, past 30 days) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; Id=6008; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Message -AutoSize -Wrap } else { Write-Output '  No unexpected shutdown events in the last 30 days' }" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; Id=6008; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Message -AutoSize -Wrap | Out-String -Width 200 } else { Write-Output '  No unexpected shutdown events in the last 30 days' }" >> "%LOGFILE%" 2>&1
 echo. >> "%LOGFILE%"
 call :Spin
 
 :: --- 0k4: Critical Events (Level 1 = Critical, any source) ---
 echo --- 0k4: All Critical System Events (last 10, past 30 days) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; Level=1; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, ProviderName, Id, Message -AutoSize -Wrap } else { Write-Output '  No critical events in the last 30 days' }" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; Level=1; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, ProviderName, Id, Message -AutoSize -Wrap | Out-String -Width 200 } else { Write-Output '  No critical events in the last 30 days' }" >> "%LOGFILE%" 2>&1
 echo. >> "%LOGFILE%"
 call :Spin
 
@@ -763,7 +763,7 @@ echo --- 0k5: Memory Dump Files --- >> "%LOGFILE%"
 echo   --- Full Memory Dump --- >> "%LOGFILE%"
 powershell -NoProfile -Command "$sr = $env:SystemRoot; if (Test-Path \"$sr\MEMORY.DMP\") { $f = Get-Item \"$sr\MEMORY.DMP\"; Write-Output ('  MEMORY.DMP: ' + [math]::Round($f.Length/1MB) + ' MB, Last written: ' + $f.LastWriteTime) } else { Write-Output '  MEMORY.DMP: Not found' }" >> "%LOGFILE%" 2>&1
 echo   --- Minidump Files (last 10) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$sr = $env:SystemRoot; if (Test-Path \"$sr\Minidump\") { $dumps = Get-ChildItem \"$sr\Minidump\*.dmp\" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 10; if ($dumps) { $dumps | Format-Table Name, @{N='SizeKB';E={[math]::Round($_.Length/1KB)}}, LastWriteTime -AutoSize } else { Write-Output '  Minidump folder exists but no .dmp files found' } } else { Write-Output '  Minidump folder: Not found' }" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "$sr = $env:SystemRoot; if (Test-Path \"$sr\Minidump\") { $dumps = Get-ChildItem \"$sr\Minidump\*.dmp\" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 10; if ($dumps) { $dumps | Format-Table Name, @{N='SizeKB';E={[math]::Round($_.Length/1KB)}}, LastWriteTime -AutoSize | Out-String -Width 200 } else { Write-Output '  Minidump folder exists but no .dmp files found' } } else { Write-Output '  Minidump folder: Not found' }" >> "%LOGFILE%" 2>&1
 echo   --- Crash Dump Settings --- >> "%LOGFILE%"
 reg query "HKLM\SYSTEM\CurrentControlSet\Control\CrashControl" /v CrashDumpEnabled >> "%LOGFILE%" 2>&1
 reg query "HKLM\SYSTEM\CurrentControlSet\Control\CrashControl" /v DumpFile >> "%LOGFILE%" 2>&1
@@ -773,16 +773,16 @@ call :Spin
 
 :: --- 0l: Installed Updates (last 15) ---
 echo --- 0l: Recent Installed Updates --- >> "%LOGFILE%"
-powershell -NoProfile -Command "Get-HotFix -ErrorAction SilentlyContinue | Sort-Object InstalledOn -Descending | Select-Object -First 15 | Format-Table HotFixID, InstalledOn, Description -AutoSize" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "Get-HotFix -ErrorAction SilentlyContinue | Sort-Object InstalledOn -Descending | Select-Object -First 15 | Format-Table HotFixID, InstalledOn, Description -AutoSize | Out-String -Width 200" >> "%LOGFILE%" 2>&1
 echo. >> "%LOGFILE%"
 call :Spin
 
 :: --- 0m: Network Configuration ---
 echo --- 0m: Network Configuration --- >> "%LOGFILE%"
 echo   --- Active Adapters --- >> "%LOGFILE%"
-powershell -NoProfile -Command "Get-NetAdapter | Where-Object Status -eq 'Up' | Select-Object Name, InterfaceDescription, Status, LinkSpeed | Format-Table -AutoSize" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "Get-NetAdapter | Where-Object Status -eq 'Up' | Select-Object Name, InterfaceDescription, Status, LinkSpeed | Format-Table -AutoSize | Out-String -Width 200" >> "%LOGFILE%" 2>&1
 echo   --- DNS Servers --- >> "%LOGFILE%"
-powershell -NoProfile -Command "Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object ServerAddresses | Select-Object InterfaceAlias, ServerAddresses | Format-Table -AutoSize" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object ServerAddresses | Select-Object InterfaceAlias, ServerAddresses | Format-Table -AutoSize | Out-String -Width 200" >> "%LOGFILE%" 2>&1
 echo   --- Proxy Settings --- >> "%LOGFILE%"
 netsh winhttp show proxy >> "%LOGFILE%" 2>&1
 reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable >> "%LOGFILE%" 2>&1
@@ -1289,7 +1289,7 @@ echo ------------------------------------------------------------ >> "%LOGFILE%"
 echo [STEP 14] Recent Update History - %TIME% >> "%LOGFILE%"
 echo ------------------------------------------------------------ >> "%LOGFILE%"
 
-powershell -NoProfile -Command "Get-HotFix | Sort-Object InstalledOn -Descending -ErrorAction SilentlyContinue | Select-Object -First 10 | Format-Table HotFixID, InstalledOn, Description -AutoSize" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "Get-HotFix | Sort-Object InstalledOn -Descending -ErrorAction SilentlyContinue | Select-Object -First 10 | Format-Table HotFixID, InstalledOn, Description -AutoSize | Out-String -Width 200" >> "%LOGFILE%" 2>&1
 echo. >> "%LOGFILE%"
 
 call :SpinDone

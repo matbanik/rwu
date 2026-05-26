@@ -234,6 +234,26 @@ Describe 'Phase 7 — Test Mode (static analysis)' {
     }
 }
 
+Describe 'Phase 8 — Diagnostic Output Formatting' {
+    It 'All Format-Table calls pipe through Out-String -Width (no truncation)' {
+        # Every Format-Table that redirects to LOGFILE must use Out-String -Width
+        # to prevent column truncation in redirected console output
+        $lines = $cmd -split "`n" | Where-Object {
+            $_ -match 'Format-Table' -and $_ -match 'LOGFILE' -and $_ -notmatch '^\s*::'
+        }
+        $lines.Count | Should -BeGreaterThan 0
+        foreach ($line in $lines) {
+            $line | Should -Match 'Out-String\s+-Width' -Because "Format-Table at: $($line.Trim().Substring(0, [Math]::Min(80, $line.Trim().Length)))"
+        }
+    }
+    It 'RAM shows CapacityGB not raw bytes' {
+        $cmd | Should -Match 'CapacityGB'
+    }
+    It 'LicenseStatus uses human-readable enum' {
+        $cmd | Should -Match "switch.*LicenseStatus.*Licensed"
+    }
+}
+
 Describe 'Phase 7 — TUI Navigation (integration, no elevation)' {
 
     Context 'Main Menu → Exit' {
