@@ -15,7 +15,7 @@ setlocal EnableDelayedExpansion
 :: ============================================================
 
 :: Version: bump this before each GitHub release (semver: MAJOR.MINOR.PATCH)
-set "ver=1.0.1"
+set "ver=1.0.2"
 
 :: ============================================================
 :: OPTIONS (change these before running if needed)
@@ -25,7 +25,7 @@ set "RESET_WU_POLICIES=0"
 :: Set to 1 to reset BITS/WU service security descriptors (Step 7)
 set "RESET_SERVICE_SDDL=0"
 :: Set to 1 to enable debug trace logging to Desktop\RWU_Debug.log
-set "DEBUG=0"
+set "DEBUG=1"
 :: Test mode: TUI navigation only, no workloads, no admin required
 set "_TESTMODE=0"
 :: Automated key sequence for testing (comma-separated errorlevel values)
