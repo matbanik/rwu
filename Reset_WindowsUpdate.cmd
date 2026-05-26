@@ -1461,7 +1461,7 @@ exit /b
 if not defined _AUTOKEYS (
     choice %*
     set "_erl=!errorlevel!"
-    exit /b
+    exit /b !_erl!
 )
 :: Pop next key from _autokeys sequence
 set /a _AUTOKEY_POS+=1

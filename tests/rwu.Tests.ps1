@@ -218,6 +218,11 @@ Describe 'Phase 7 — Test Mode (static analysis)' {
     It '/autokeys flag is parsed' {
         $cmd | Should -Match '"/autokeys"'
     }
+    It ':Choice preserves errorlevel with exit /b !_erl!' {
+        # Regression: 'set' resets errorlevel to 0. Without 'exit /b !_erl!',
+        # the caller always sees errorlevel=0 and no menu option ever matches.
+        $cmd | Should -Match ':Choice[\s\S]*?exit /b !_erl!'
+    }
 }
 
 Describe 'Phase 7 — TUI Navigation (integration, no elevation)' {
