@@ -136,10 +136,11 @@ Describe 'Phase 2 — Batch Debug/Trace System' {
 Describe 'Phase 3 — Step 6 Fail-Closed Backup' {
     BeforeAll { $script:cmd = Get-CmdFileContent }
 
-    It 'Checks mkdir success before proceeding' -Skip {
+    It 'Checks mkdir success before proceeding' {
         $cmd | Should -Match 'mkdir.*POLICY_BACKUP_DIR.*\r?\n.*errorlevel'
     }
-    It 'Checks reg export success before reg delete' -Skip {
+    It 'Checks reg export success before reg delete' {
+        # reg export should be followed by errorlevel check, not bare reg delete
         $cmd | Should -Not -Match 'reg export.*\r?\n\s*reg delete'
     }
 }
@@ -149,16 +150,16 @@ Describe 'Phase 3 — Step 6 Fail-Closed Backup' {
 Describe 'Phase 4 — Error Counting for Repair Commands' {
     BeforeAll { $script:cmd = Get-CmdFileContent }
 
-    It 'net stop has errorlevel checking' -Skip {
+    It 'net stop has errorlevel checking' {
         $cmd | Should -Match 'net stop.*\r?\n.*errorlevel'
     }
-    It 'bitsadmin has errorlevel checking' -Skip {
+    It 'bitsadmin has errorlevel checking' {
         $cmd | Should -Match 'bitsadmin.*\r?\n.*errorlevel'
     }
-    It 'netsh winsock reset has errorlevel checking' -Skip {
+    It 'netsh winsock reset has errorlevel checking' {
         $cmd | Should -Match 'netsh winsock reset.*\r?\n.*errorlevel'
     }
-    It 'net start has errorlevel checking' -Skip {
+    It 'net start has errorlevel checking' {
         $cmd | Should -Match 'net start.*\r?\n.*errorlevel'
     }
 }
@@ -168,7 +169,7 @@ Describe 'Phase 4 — Error Counting for Repair Commands' {
 Describe 'Phase 5 — PowerShell -NoProfile Consistency' {
     BeforeAll { $script:cmd = Get-CmdFileContent }
 
-    It 'All powershell calls include -NoProfile' -Skip {
+    It 'All powershell calls include -NoProfile' {
         $lines = $cmd -split "`n" | Where-Object { $_ -match 'powershell\s+-' -and $_ -match '-Command' }
         foreach ($line in $lines) {
             $line | Should -Match '-NoProfile' -Because "Line: $($line.Trim())"
@@ -181,10 +182,10 @@ Describe 'Phase 5 — PowerShell -NoProfile Consistency' {
 Describe 'Phase 6 — Help Text' {
     BeforeAll { $script:cmd = Get-CmdFileContent }
 
-    It '/help text mentions /debug flag' -Skip {
+    It '/help text mentions /debug flag' {
         $cmd | Should -Match 'debug.*trace'
     }
-    It '/help exit code is 0' -Skip {
+    It '/help exit code is 0' {
         $tmpDir = Join-Path $env:TEMP "rwu_test_help_$(Get-Random)"
         New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
         $r = Invoke-RwuCmd -Arguments @('/help') -LogDir $tmpDir

@@ -794,6 +794,14 @@ echo ------------------------------------------------------------ >> "%LOGFILE%"
 for %%s in (wuauserv UsoSvc DoSvc cryptSvc bits msiserver appidsvc TrustedInstaller) do (
     echo   Stopping %%s... >> "%LOGFILE%"
     net stop %%s /y >> "%LOGFILE%" 2>&1
+    if !errorlevel! neq 0 (
+        if !errorlevel! equ 2 (
+            echo     INFO: %%s was not running >> "%LOGFILE%"
+        ) else (
+            echo     WARNING: net stop %%s returned !errorlevel! >> "%LOGFILE%"
+            set /a WARN_COUNT+=1
+        )
+    )
     call :Spin
 )
 echo. >> "%LOGFILE%"
@@ -887,6 +895,10 @@ echo ------------------------------------------------------------ >> "%LOGFILE%"
 echo [STEP 5] Reset BITS Queue - %TIME% >> "%LOGFILE%"
 echo ------------------------------------------------------------ >> "%LOGFILE%"
 bitsadmin /reset /allusers >> "%LOGFILE%" 2>&1
+if !errorlevel! neq 0 (
+    echo   WARNING: bitsadmin reset returned !errorlevel! >> "%LOGFILE%"
+    set /a WARN_COUNT+=1
+)
 echo. >> "%LOGFILE%"
 
 call :SpinDone
@@ -906,16 +918,26 @@ if "!RESET_WU_POLICIES!"=="1" (
 
     set "POLICY_BACKUP_DIR=%DESKTOP%\WU_PolicyBackup_%TIMESTAMP%"
     mkdir "!POLICY_BACKUP_DIR!" >> "%LOGFILE%" 2>&1
+    if !errorlevel! neq 0 (
+        echo   FAIL: Cannot create backup directory >> "%LOGFILE%"
+        set /a FAIL_COUNT+=1
+        goto :Step6End
+    )
 
-    :: Export existing keys BEFORE deleting (backup)
+    :: Export existing keys BEFORE deleting (backup) — fail-closed
     set "POLICY_FOUND=0"
 
     reg query "HKCU\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" >nul 2>&1
     if !errorlevel! equ 0 (
         echo   Exporting HKCU WU policy... >> "%LOGFILE%"
         reg export "HKCU\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" "!POLICY_BACKUP_DIR!\HKCU_WU_Policy.reg" /y >> "%LOGFILE%" 2>&1
-        reg delete "HKCU\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /f >> "%LOGFILE%" 2>&1
-        set "POLICY_FOUND=1"
+        if !errorlevel! equ 0 (
+            reg delete "HKCU\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /f >> "%LOGFILE%" 2>&1
+            set "POLICY_FOUND=1"
+        ) else (
+            echo   FAIL: Export failed, skipping delete for safety >> "%LOGFILE%"
+            set /a FAIL_COUNT+=1
+        )
     ) else (
         echo   HKCU WU policy key not present ^(OK^) >> "%LOGFILE%"
     )
@@ -924,8 +946,13 @@ if "!RESET_WU_POLICIES!"=="1" (
     if !errorlevel! equ 0 (
         echo   Exporting HKCU CV WU policy... >> "%LOGFILE%"
         reg export "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" "!POLICY_BACKUP_DIR!\HKCU_CV_WU_Policy.reg" /y >> "%LOGFILE%" 2>&1
-        reg delete "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" /f >> "%LOGFILE%" 2>&1
-        set "POLICY_FOUND=1"
+        if !errorlevel! equ 0 (
+            reg delete "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" /f >> "%LOGFILE%" 2>&1
+            set "POLICY_FOUND=1"
+        ) else (
+            echo   FAIL: Export failed, skipping delete for safety >> "%LOGFILE%"
+            set /a FAIL_COUNT+=1
+        )
     ) else (
         echo   HKCU CV WU policy key not present ^(OK^) >> "%LOGFILE%"
     )
@@ -934,8 +961,13 @@ if "!RESET_WU_POLICIES!"=="1" (
     if !errorlevel! equ 0 (
         echo   Exporting HKLM WU policy... >> "%LOGFILE%"
         reg export "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" "!POLICY_BACKUP_DIR!\HKLM_WU_Policy.reg" /y >> "%LOGFILE%" 2>&1
-        reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /f >> "%LOGFILE%" 2>&1
-        set "POLICY_FOUND=1"
+        if !errorlevel! equ 0 (
+            reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /f >> "%LOGFILE%" 2>&1
+            set "POLICY_FOUND=1"
+        ) else (
+            echo   FAIL: Export failed, skipping delete for safety >> "%LOGFILE%"
+            set /a FAIL_COUNT+=1
+        )
     ) else (
         echo   HKLM WU policy key not present ^(OK^) >> "%LOGFILE%"
     )
@@ -944,12 +976,18 @@ if "!RESET_WU_POLICIES!"=="1" (
     if !errorlevel! equ 0 (
         echo   Exporting HKLM CV WU policy... >> "%LOGFILE%"
         reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" "!POLICY_BACKUP_DIR!\HKLM_CV_WU_Policy.reg" /y >> "%LOGFILE%" 2>&1
-        reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" /f >> "%LOGFILE%" 2>&1
-        set "POLICY_FOUND=1"
+        if !errorlevel! equ 0 (
+            reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" /f >> "%LOGFILE%" 2>&1
+            set "POLICY_FOUND=1"
+        ) else (
+            echo   FAIL: Export failed, skipping delete for safety >> "%LOGFILE%"
+            set /a FAIL_COUNT+=1
+        )
     ) else (
         echo   HKLM CV WU policy key not present ^(OK^) >> "%LOGFILE%"
     )
 
+    :Step6End
     if "!POLICY_FOUND!"=="1" (
         echo   Policy backups saved to: !POLICY_BACKUP_DIR! >> "%LOGFILE%"
         echo   Running gpupdate... >> "%LOGFILE%"
@@ -1090,10 +1128,18 @@ echo ------------------------------------------------------------ >> "%LOGFILE%"
 
 echo   Resetting Winsock... >> "%LOGFILE%"
 netsh winsock reset >> "%LOGFILE%" 2>&1
+if !errorlevel! neq 0 (
+    echo   WARNING: netsh winsock reset returned !errorlevel! >> "%LOGFILE%"
+    set /a WARN_COUNT+=1
+)
 echo   --- Current WinHTTP proxy (backup before reset) --- >> "%LOGFILE%"
 netsh winhttp show proxy >> "%LOGFILE%" 2>&1
 echo   Resetting WinHTTP proxy... >> "%LOGFILE%"
 netsh winhttp reset proxy >> "%LOGFILE%" 2>&1
+if !errorlevel! neq 0 (
+    echo   WARNING: netsh winhttp reset proxy returned !errorlevel! >> "%LOGFILE%"
+    set /a WARN_COUNT+=1
+)
 echo. >> "%LOGFILE%"
 
 call :SpinDone
@@ -1129,6 +1175,9 @@ echo ------------------------------------------------------------ >> "%LOGFILE%"
 for %%s in (cryptSvc bits appidsvc msiserver DoSvc UsoSvc wuauserv TrustedInstaller) do (
     echo   Starting %%s... >> "%LOGFILE%"
     net start %%s >> "%LOGFILE%" 2>&1
+    if !errorlevel! neq 0 (
+        echo     INFO: net start %%s returned !errorlevel! >> "%LOGFILE%"
+    )
     call :Spin
 )
 echo. >> "%LOGFILE%"
@@ -1172,10 +1221,10 @@ echo    may indicate proxy, firewall, or DNS issues.) >> "%LOGFILE%"
 echo ------------------------------------------------------------ >> "%LOGFILE%"
 
 echo   Testing connection to Microsoft Update... >> "%LOGFILE%"
-powershell -Command "try { $r = Invoke-WebRequest -Uri 'https://update.microsoft.com' -UseBasicParsing -TimeoutSec 15; Write-Output \"  Status: $($r.StatusCode) - OK\" } catch { Write-Output \"  FAILED: $($_.Exception.Message)\" }" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'https://update.microsoft.com' -UseBasicParsing -TimeoutSec 15; Write-Output \"  Status: $($r.StatusCode) - OK\" } catch { Write-Output \"  FAILED: $($_.Exception.Message)\" }" >> "%LOGFILE%" 2>&1
 
 echo   Testing connection to Windows Update CDN... >> "%LOGFILE%"
-powershell -Command "try { $r = Invoke-WebRequest -Uri 'https://download.windowsupdate.com' -UseBasicParsing -TimeoutSec 15; Write-Output \"  Status: $($r.StatusCode) - OK\" } catch { Write-Output \"  FAILED: $($_.Exception.Message)\" }" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'https://download.windowsupdate.com' -UseBasicParsing -TimeoutSec 15; Write-Output \"  Status: $($r.StatusCode) - OK\" } catch { Write-Output \"  FAILED: $($_.Exception.Message)\" }" >> "%LOGFILE%" 2>&1
 echo. >> "%LOGFILE%"
 
 call :SpinDone
@@ -1191,7 +1240,7 @@ echo ------------------------------------------------------------ >> "%LOGFILE%"
 echo [STEP 14] Recent Update History - %TIME% >> "%LOGFILE%"
 echo ------------------------------------------------------------ >> "%LOGFILE%"
 
-powershell -Command "Get-HotFix | Sort-Object InstalledOn -Descending -ErrorAction SilentlyContinue | Select-Object -First 10 | Format-Table HotFixID, InstalledOn, Description -AutoSize" >> "%LOGFILE%" 2>&1
+powershell -NoProfile -Command "Get-HotFix | Sort-Object InstalledOn -Descending -ErrorAction SilentlyContinue | Select-Object -First 10 | Format-Table HotFixID, InstalledOn, Description -AutoSize" >> "%LOGFILE%" 2>&1
 echo. >> "%LOGFILE%"
 
 call :SpinDone
