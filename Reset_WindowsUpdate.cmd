@@ -15,7 +15,7 @@ setlocal EnableDelayedExpansion
 :: ============================================================
 
 :: Version: bump this before each GitHub release (semver: MAJOR.MINOR.PATCH)
-set "ver=1.0.7"
+set "ver=1.1.0"
 
 :: ============================================================
 :: OPTIONS (change these before running if needed)
