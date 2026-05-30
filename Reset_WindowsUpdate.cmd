@@ -157,6 +157,21 @@ if /I "%~1"=="/step" (
     set "_CLI_STEP=%~2"
     shift & shift & goto :ParseArgsLoop
 )
+if /I "%~1"=="/fix" (
+    if defined _CLI_ACTION (
+        echo ERROR: Conflicting actions: /!_CLI_ACTION! and /fix
+        echo Only one action allowed. Use /help for usage.
+        endlocal & exit /b 1
+    )
+    if "%~2"=="" (
+        echo ERROR: /fix requires a target. Example: /fix dism
+        echo Valid targets: dism, sfc, combo, chkdsk, proxy
+        endlocal & exit /b 1
+    )
+    set "_CLI_ACTION=fix"
+    set "_CLI_FIX=%~2"
+    shift & shift & goto :ParseArgsLoop
+)
 if /I "%~1"=="/logdir" (
     if "%~2"=="" (
         echo ERROR: /logdir requires a path. Example: /logdir "C:\Temp"
@@ -193,7 +208,7 @@ if not defined _CLI_ACTION (
         set "_CLI_MODE=0"
         goto :MainMenu
     )
-    echo ERROR: No action specified. Use /diag, /reset, or /step N.
+    echo ERROR: No action specified. Use /diag, /reset, /step N, or /fix TARGET.
     echo Run with /help for usage.
     endlocal & exit /b 1
 )
@@ -218,6 +233,16 @@ if /I "!_CLI_ACTION!"=="step" (
     if /I "!_CLI_STEP!"=="finalize" goto :RunFinalize
     echo ERROR: Unknown step: !_CLI_STEP!
     echo Valid steps: 0, 1-2, 3, 4, 5, 6, 7, 8, 9-10, 11-14, finalize
+    endlocal & exit /b 1
+)
+if /I "!_CLI_ACTION!"=="fix" (
+    if /I "!_CLI_FIX!"=="dism"   goto :RunFixDISM
+    if /I "!_CLI_FIX!"=="sfc"    goto :RunFixSFC
+    if /I "!_CLI_FIX!"=="combo"  goto :RunFixCombo
+    if /I "!_CLI_FIX!"=="chkdsk" goto :RunFixCHKDSK
+    if /I "!_CLI_FIX!"=="proxy"  goto :RunFixProxy
+    echo ERROR: Unknown fix target: !_CLI_FIX!
+    echo Valid targets: dism, sfc, combo, chkdsk, proxy
     endlocal & exit /b 1
 )
 echo ERROR: Unknown action: !_CLI_ACTION!
@@ -247,6 +272,9 @@ echo:               only run if their toggles are ON below.
 echo:
 echo:          [3]  Advanced  ^>
 echo:               Pick individual steps to run.
+echo:
+echo:          [S]  System Fixes  ^>
+echo:               DISM, SFC, CHKDSK — repair underlying system issues.
 echo:          ________________________________________________________
 echo:
 :: Build colored toggle labels (OFF=gray, ON=yellow)
@@ -273,19 +301,20 @@ echo:     Dir: !_LOGDIR!
 echo:  ================================================================
 echo.
 call :Trace "MainMenu: waiting for choice"
-call :Choice /C:123456780 /N /M "  Choose an option [1,2,3,4,5,6,7,8,0]: "
+call :Choice /C:12345678S0 /N /M "  Choose an option [1,2,3,4,5,6,7,8,S,0]: "
 if not defined _AUTOKEYS set "_erl=!errorlevel!"
 call :Trace "MainMenu: choice returned !_erl!"
 
-if !_erl!==9 ( call :Trace "MainMenu: exit" & endlocal & exit /b 0 )
-if !_erl!==8 ( call :Trace "MainMenu: goto :ToggleDebug" & goto :ToggleDebug )
-if !_erl!==7 ( call :Trace "MainMenu: goto :ShowHelp" & goto :ShowHelp )
-if !_erl!==6 ( call :Trace "MainMenu: goto :ChangeLogFolder" & goto :ChangeLogFolder )
-if !_erl!==5 ( call :Trace "MainMenu: goto :ToggleSDDL" & goto :ToggleSDDL )
-if !_erl!==4 ( call :Trace "MainMenu: goto :ToggleWUPolicy" & goto :ToggleWUPolicy )
-if !_erl!==3 ( call :Trace "MainMenu: goto :AdvancedMenu" & goto :AdvancedMenu )
-if !_erl!==2 ( call :Trace "MainMenu: goto :FullReset" & goto :FullReset )
-if !_erl!==1 ( call :Trace "MainMenu: goto :DiagnosticsOnly" & goto :DiagnosticsOnly )
+if !_erl!==10 ( call :Trace "MainMenu: exit" & endlocal & exit /b 0 )
+if !_erl!==9  ( call :Trace "MainMenu: goto :SystemFixesMenu" & goto :SystemFixesMenu )
+if !_erl!==8  ( call :Trace "MainMenu: goto :ToggleDebug" & goto :ToggleDebug )
+if !_erl!==7  ( call :Trace "MainMenu: goto :ShowHelp" & goto :ShowHelp )
+if !_erl!==6  ( call :Trace "MainMenu: goto :ChangeLogFolder" & goto :ChangeLogFolder )
+if !_erl!==5  ( call :Trace "MainMenu: goto :ToggleSDDL" & goto :ToggleSDDL )
+if !_erl!==4  ( call :Trace "MainMenu: goto :ToggleWUPolicy" & goto :ToggleWUPolicy )
+if !_erl!==3  ( call :Trace "MainMenu: goto :AdvancedMenu" & goto :AdvancedMenu )
+if !_erl!==2  ( call :Trace "MainMenu: goto :FullReset" & goto :FullReset )
+if !_erl!==1  ( call :Trace "MainMenu: goto :DiagnosticsOnly" & goto :DiagnosticsOnly )
 call :Trace "MainMenu: no match, looping"
 goto :MainMenu
 
@@ -307,13 +336,21 @@ echo  ACTIONS:                           STEP NUMBERS:
 echo   /diag      Diagnostics only        0    System Diagnostics
 echo   /reset     Full reset (0-14)       1-2  Stop services
 echo   /step N    Run specific step       3    Delete BITS queue
-echo                                      4    Rename cache folders
-echo  OPTIONS:                            5    Reset BITS queue
-echo   /policy    Enable policy reset     6    Reset WU policies
-echo   /sddl      Enable SDDL reset       7    Reset service SDDL
-echo   /debug     Enable debug trace log   8    Re-register DLLs
-echo   /logdir P  Set log folder           9-10 Network reset
-echo:  /help /?   This help               11-14 or finalize
+echo   /fix T     Run system fix          4    Rename cache folders
+echo                                      5    Reset BITS queue
+echo  FIX TARGETS:                        6    Reset WU policies
+echo   dism    DISM RestoreHealth          7    Reset service SDDL
+echo   sfc     System File Checker         8    Re-register DLLs
+echo   combo   DISM then SFC              9-10 Network reset
+echo   chkdsk  Schedule disk check        11-14 or finalize
+echo   proxy   Reset WinHTTP proxy
+echo.
+echo  OPTIONS:
+echo   /policy    Enable policy reset
+echo   /sddl      Enable SDDL reset
+echo   /debug     Enable debug trace log
+echo   /logdir P  Set log folder
+echo:  /help /?   This help
 echo  WARNING: /policy and /sddl bypass confirmation prompts.
 echo  They delete registry keys and overwrite service permissions.
 echo.
@@ -321,6 +358,7 @@ echo  EXAMPLES:
 echo   Reset_WindowsUpdate.cmd /diag
 echo   Reset_WindowsUpdate.cmd /reset /policy /sddl
 echo   Reset_WindowsUpdate.cmd /step 3
+echo   Reset_WindowsUpdate.cmd /fix combo
 echo   Reset_WindowsUpdate.cmd /diag /logdir "C:\Temp"
 echo.
 echo  NOTES:
@@ -465,6 +503,55 @@ if !_erl!==3  goto :RunStep3
 if !_erl!==2  goto :RunStopServices
 if !_erl!==1  goto :DiagnosticsOnly
 goto :AdvancedMenu
+
+:: ============================================================
+:: SYSTEM FIXES MENU
+:: ============================================================
+
+:SystemFixesMenu
+call :Trace "entering :SystemFixesMenu"
+call :BlankScreen
+echo.
+echo:  ================================================================
+echo:     System Fixes: Repair Underlying System Issues
+echo:  ================================================================
+echo:
+echo:     These commands repair system-level corruption that
+echo:     prevents Windows Update from functioning correctly.
+echo:     Run them AFTER a WU reset if updates still fail.
+echo:
+echo:       [1]  DISM - Repair Component Store
+echo:            Repairs the Windows system image. (10-30 min)
+echo:            Requires internet to download repairs.
+echo:
+echo:       [2]  SFC - Scan ^& Repair System Files
+echo:            Scans and repairs protected OS files. (5-15 min)
+echo:
+echo:       [3]  DISM + SFC Combo (recommended)
+echo:            Runs DISM first, then SFC - correct order. (15-45 min)
+echo:
+echo:       [4]  CHKDSK - Schedule Disk Check
+echo:            Schedules disk repair on next reboot. (30-120 min)
+echo:            Requires reboot. Do NOT interrupt once started.
+echo:
+echo:       [5]  Reset Proxy Settings
+echo:            Resets WinHTTP proxy to direct connection.
+echo:     ________________________________________________________
+echo:
+echo:       [0]  Back to Main Menu
+echo:
+echo:  ================================================================
+echo.
+call :Choice /C:123450 /N /M "  Choose a fix [1-5,0]: "
+if not defined _AUTOKEYS set "_erl=!errorlevel!"
+
+if !_erl!==6 goto :MainMenu
+if !_erl!==5 goto :RunFixProxy
+if !_erl!==4 goto :RunFixCHKDSK
+if !_erl!==3 goto :RunFixCombo
+if !_erl!==2 goto :RunFixSFC
+if !_erl!==1 goto :RunFixDISM
+goto :SystemFixesMenu
 
 :: ============================================================
 :: CHANGE LOG FOLDER
@@ -645,6 +732,44 @@ set "_RUN_LABEL=Steps 11-14: Restart services + post-reset checks"
 if "!_TESTMODE!"=="1" ( call :Trace "TESTMODE: skip RunFinalize" & goto :StepDone )
 call :InitLog
 goto :Step11
+
+:: --- System Fix flow targets ---
+:: Each sets _STOP_AFTER and _RUN_LABEL, then jumps to workload
+
+:RunFixDISM
+set "_STOP_AFTER=FixDISM"
+set "_RUN_LABEL=System Fix: DISM Repair Component Store"
+if "!_TESTMODE!"=="1" ( call :Trace "TESTMODE: skip RunFixDISM" & goto :StepDone )
+call :InitLog
+goto :FixDISM
+
+:RunFixSFC
+set "_STOP_AFTER=FixSFC"
+set "_RUN_LABEL=System Fix: SFC System File Checker"
+if "!_TESTMODE!"=="1" ( call :Trace "TESTMODE: skip RunFixSFC" & goto :StepDone )
+call :InitLog
+goto :FixSFC
+
+:RunFixCombo
+set "_STOP_AFTER=FixSFC"
+set "_RUN_LABEL=System Fix: DISM + SFC Combo (recommended order)"
+if "!_TESTMODE!"=="1" ( call :Trace "TESTMODE: skip RunFixCombo" & goto :StepDone )
+call :InitLog
+goto :FixDISM
+
+:RunFixCHKDSK
+set "_STOP_AFTER=FixCHKDSK"
+set "_RUN_LABEL=System Fix: Schedule CHKDSK on Next Reboot"
+if "!_TESTMODE!"=="1" ( call :Trace "TESTMODE: skip RunFixCHKDSK" & goto :StepDone )
+call :InitLog
+goto :FixCHKDSK
+
+:RunFixProxy
+set "_STOP_AFTER=FixProxy"
+set "_RUN_LABEL=System Fix: Reset WinHTTP Proxy Settings"
+if "!_TESTMODE!"=="1" ( call :Trace "TESTMODE: skip RunFixProxy" & goto :StepDone )
+call :InitLog
+goto :FixProxy
 
 :: -----------------------------------------------
 :: STEP 0: Capture system diagnostics
@@ -1396,6 +1521,191 @@ echo. >> "%LOGFILE%"
 
 call :SpinDone
 goto :StepDone
+
+:: -----------------------------------------------
+:: SYSTEM FIX: DISM - Repair Component Store
+:: -----------------------------------------------
+:FixDISM
+echo [FIX] DISM - Repairing component store...
+echo   This may take 10-30 minutes. Do not interrupt.
+call :Spin
+echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo [FIX] DISM /Online /Cleanup-Image /RestoreHealth - %TIME% >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "%LOGFILE%"
+
+set "_DISM_FIX_TMP=%TEMP%\rwu_dism_fix_%RANDOM%.txt"
+DISM /Online /Cleanup-Image /RestoreHealth > "!_DISM_FIX_TMP!" 2>&1
+set "_dism_fix_erl=!errorlevel!"
+type "!_DISM_FIX_TMP!" >> "%LOGFILE%"
+echo   DISM RestoreHealth exit code: !_dism_fix_erl! >> "%LOGFILE%"
+if !_dism_fix_erl! neq 0 (
+    echo   FAIL: DISM RestoreHealth failed ^(exit code !_dism_fix_erl!^) >> "%LOGFILE%"
+    echo   TIP: If DISM failed, try running with a Windows ISO as source: >> "%LOGFILE%"
+    echo   DISM /Online /Cleanup-Image /RestoreHealth /Source:D:\sources >> "%LOGFILE%"
+    set /a FAIL_COUNT+=1
+) else (
+    echo   SUCCESS: Component store repair completed >> "%LOGFILE%"
+    :: Check if repairs were actually made (use /C: for literal phrase match)
+    findstr /I /C:"successfully repaired" "!_DISM_FIX_TMP!" >nul 2>&1
+    if !errorlevel! equ 0 (
+        echo   FINDING: DISM repaired component store corruption >> "%LOGFILE%"
+        set /a DIAG_FINDINGS+=1
+    )
+)
+del "!_DISM_FIX_TMP!" >nul 2>&1
+echo. >> "%LOGFILE%"
+
+call :SpinDone
+if /I "!_STOP_AFTER!"=="FixDISM" goto :StepDone
+
+:: -----------------------------------------------
+:: SYSTEM FIX: SFC - System File Checker
+:: -----------------------------------------------
+:FixSFC
+echo [FIX] SFC - Scanning system files...
+echo   This may take 5-15 minutes. Do not interrupt.
+call :Spin
+echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo [FIX] sfc /scannow - %TIME% >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "%LOGFILE%"
+
+set "_SFC_TMP=%TEMP%\rwu_sfc_%RANDOM%.txt"
+sfc /scannow > "!_SFC_TMP!" 2>&1
+set "_sfc_erl=!errorlevel!"
+type "!_SFC_TMP!" >> "%LOGFILE%"
+echo   SFC exit code: !_sfc_erl! >> "%LOGFILE%"
+
+:: SFC exit codes: 0=no issues, 1=found+fixed, 2=found but couldn't fix
+:: Check exit code first, then parse output text for details
+if !_sfc_erl! neq 0 (
+    :: Non-zero exit code — SFC encountered a problem
+    findstr /I /C:"found corrupt files" "!_SFC_TMP!" >nul 2>&1
+    if !errorlevel! equ 0 (
+        findstr /I /C:"unable to fix" "!_SFC_TMP!" >nul 2>&1
+        if !errorlevel! equ 0 (
+            echo   FAIL: SFC found corrupt files but could not fix all of them >> "%LOGFILE%"
+            echo   TIP: Run DISM /RestoreHealth first, then re-run SFC >> "%LOGFILE%"
+            set /a FAIL_COUNT+=1
+        ) else (
+            echo   FINDING: SFC found and repaired corrupt system files >> "%LOGFILE%"
+            set /a DIAG_FINDINGS+=1
+        )
+    ) else (
+        echo   FAIL: SFC returned exit code !_sfc_erl! >> "%LOGFILE%"
+        set /a FAIL_COUNT+=1
+    )
+) else (
+    :: Zero exit code — check output text for confirmation
+    findstr /I /C:"did not find any integrity violations" "!_SFC_TMP!" >nul 2>&1
+    if !errorlevel! equ 0 (
+        echo   OK: No integrity violations found >> "%LOGFILE%"
+    ) else (
+        findstr /I /C:"found corrupt files" "!_SFC_TMP!" >nul 2>&1
+        if !errorlevel! equ 0 (
+            echo   FINDING: SFC found and repaired corrupt system files >> "%LOGFILE%"
+            set /a DIAG_FINDINGS+=1
+        ) else (
+            echo   OK: SFC completed with exit code 0 >> "%LOGFILE%"
+        )
+    )
+)
+
+:: Capture relevant CBS.log tail for context
+echo   --- Last CBS.log entries after SFC --- >> "%LOGFILE%"
+powershell -NoProfile -Command "if (Test-Path 'C:\Windows\Logs\CBS\CBS.log') { Get-Content 'C:\Windows\Logs\CBS\CBS.log' -Tail 200 | Select-String -Pattern 'Verify complete|Cannot repair|Corrupt|Hashes for' -CaseSensitive:$false | Select-Object -Last 10 | ForEach-Object { $_.Line.Trim() } } else { Write-Output '  CBS.log not found' }" >> "%LOGFILE%" 2>&1
+echo. >> "%LOGFILE%"
+
+del "!_SFC_TMP!" >nul 2>&1
+
+call :SpinDone
+if /I "!_STOP_AFTER!"=="FixSFC" goto :StepDone
+
+:: -----------------------------------------------
+:: SYSTEM FIX: CHKDSK - Schedule Disk Check
+:: -----------------------------------------------
+:FixCHKDSK
+echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo [FIX] CHKDSK - Schedule Disk Check - %TIME% >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "%LOGFILE%"
+
+:: Interactive mode gets a confirmation prompt; CLI skips it
+if "!_CLI_MODE!"=="1" goto :FixCHKDSK_Run
+
+call :BlankScreen
+echo.
+echo  ================================================================
+echo     WARNING: Schedule Disk Check (CHKDSK)
+echo  ================================================================
+echo.
+echo   This will schedule a disk check on your NEXT REBOOT.
+echo.
+echo   - The check runs BEFORE Windows starts
+echo   - It can take 30-120 minutes depending on disk size
+echo   - Do NOT interrupt it or power off during the check
+echo   - Your PC will reboot to Windows automatically when done
+echo.
+echo  ================================================================
+echo.
+call :Choice /C:YN /N /M "  Schedule CHKDSK on next reboot? [Y/N]: "
+if not defined _AUTOKEYS set "_erl=!errorlevel!"
+if !_erl!==2 (
+    echo   CHKDSK scheduling cancelled by user >> "%LOGFILE%"
+    echo   Cancelled.
+    call :SpinDone
+    goto :StepDone
+)
+
+:FixCHKDSK_Run
+echo [FIX] CHKDSK - Scheduling disk check...
+call :Spin
+
+:: Log current disk health first
+echo   --- Current disk status --- >> "%LOGFILE%"
+powershell -NoProfile -Command "Get-Volume -DriveLetter C -ErrorAction SilentlyContinue | Select-Object DriveLetter, FileSystem, HealthStatus, @{N='SizeGB';E={[math]::Round($_.Size/1GB,1)}}, @{N='FreeGB';E={[math]::Round($_.SizeRemaining/1GB,1)}} | Format-List" >> "%LOGFILE%" 2>&1
+
+echo   Scheduling chkdsk C: /f /r ... >> "%LOGFILE%"
+echo Y | chkdsk C: /f /r >> "%LOGFILE%" 2>&1
+set "_chk_erl=!errorlevel!"
+echo   CHKDSK exit code: !_chk_erl! >> "%LOGFILE%"
+
+if !_chk_erl! neq 0 (
+    :: chkdsk returns non-zero when it schedules for reboot - this is expected
+    echo   INFO: CHKDSK scheduled for next reboot >> "%LOGFILE%"
+    echo   Reboot your computer to begin the disk check. >> "%LOGFILE%"
+) else (
+    echo   INFO: CHKDSK completed or scheduled >> "%LOGFILE%"
+)
+echo. >> "%LOGFILE%"
+
+call :SpinDone
+if /I "!_STOP_AFTER!"=="FixCHKDSK" goto :StepDone
+
+:: -----------------------------------------------
+:: SYSTEM FIX: Reset Proxy Settings
+:: -----------------------------------------------
+:FixProxy
+echo [FIX] Resetting WinHTTP proxy settings...
+call :Spin
+echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo [FIX] Reset WinHTTP Proxy - %TIME% >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "%LOGFILE%"
+
+echo   --- Current WinHTTP proxy (before reset) --- >> "%LOGFILE%"
+netsh winhttp show proxy >> "%LOGFILE%" 2>&1
+echo. >> "%LOGFILE%"
+
+echo   Resetting WinHTTP proxy to direct... >> "%LOGFILE%"
+netsh winhttp reset proxy >> "%LOGFILE%" 2>&1
+if !errorlevel! neq 0 (
+    echo   WARNING: netsh winhttp reset proxy returned !errorlevel! >> "%LOGFILE%"
+    set /a WARN_COUNT+=1
+) else (
+    echo   SUCCESS: WinHTTP proxy reset to direct connection >> "%LOGFILE%"
+)
+echo. >> "%LOGFILE%"
+
+call :SpinDone
+if /I "!_STOP_AFTER!"=="FixProxy" goto :StepDone
 
 :: -----------------------------------------------
 :: SCREEN AND SPINNER SUBROUTINES

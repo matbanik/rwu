@@ -390,7 +390,7 @@ Describe 'Phase 7 — TUI Navigation (integration, no elevation)' {
         BeforeAll {
             $script:tmpDir = Join-Path $env:TEMP "rwu_tui_exit_$(Get-Random)"
             New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
-            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '9') -LogDir $tmpDir
+            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '10') -LogDir $tmpDir
         }
         AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
 
@@ -412,7 +412,7 @@ Describe 'Phase 7 — TUI Navigation (integration, no elevation)' {
         BeforeAll {
             $script:tmpDir = Join-Path $env:TEMP "rwu_tui_help_$(Get-Random)"
             New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
-            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '7.9') -LogDir $tmpDir
+            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '7.10') -LogDir $tmpDir
         }
         AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
 
@@ -427,7 +427,7 @@ Describe 'Phase 7 — TUI Navigation (integration, no elevation)' {
         BeforeAll {
             $script:tmpDir = Join-Path $env:TEMP "rwu_tui_debug_$(Get-Random)"
             New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
-            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '8.9') -LogDir $tmpDir
+            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '8.10') -LogDir $tmpDir
         }
         AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
 
@@ -442,7 +442,7 @@ Describe 'Phase 7 — TUI Navigation (integration, no elevation)' {
         BeforeAll {
             $script:tmpDir = Join-Path $env:TEMP "rwu_tui_adv_$(Get-Random)"
             New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
-            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '3.10.9') -LogDir $tmpDir
+            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '3.10.10') -LogDir $tmpDir
         }
         AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
 
@@ -462,7 +462,7 @@ Describe 'Phase 7 — TUI Navigation (integration, no elevation)' {
         BeforeAll {
             $script:tmpDir = Join-Path $env:TEMP "rwu_tui_diag_$(Get-Random)"
             New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
-            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '1.1.9') -LogDir $tmpDir
+            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '1.1.10') -LogDir $tmpDir
         }
         AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
 
@@ -478,6 +478,226 @@ Describe 'Phase 7 — TUI Navigation (integration, no elevation)' {
         It 'Trace log shows StepDone' {
             $log = Get-Content (Join-Path $tmpDir 'RWU_Debug.log') -Raw -ErrorAction SilentlyContinue
             $log | Should -Match 'StepDone'
+        }
+    }
+}
+
+# ── Phase 13: System Fixes (/fix) ──────────────────────────────────────────────────
+
+Describe 'Phase 13 — System Fixes (static analysis)' {
+    BeforeAll { $script:cmd = Get-CmdFileContent }
+
+    It '/fix CLI flag is parsed' {
+        $cmd | Should -Match '"/fix"'
+    }
+    It '/fix requires a target argument' {
+        $cmd | Should -Match '/fix requires a target'
+    }
+    It 'All 5 fix targets are dispatched' {
+        foreach ($target in @('dism', 'sfc', 'combo', 'chkdsk', 'proxy')) {
+            $cmd | Should -Match "CLI_FIX.*$target" -Because "/fix $target should be dispatched"
+        }
+    }
+    It 'Invalid fix target shows error' {
+        $cmd | Should -Match 'Unknown fix target'
+    }
+    It ':SystemFixesMenu label exists' {
+        $cmd | Should -Match ':SystemFixesMenu'
+    }
+    It 'Main menu choice includes S' {
+        $cmd | Should -Match 'choice\s+/C:.*S.*0'
+    }
+    It 'Main menu routes S to SystemFixesMenu' {
+        $cmd | Should -Match 'SystemFixesMenu.*goto :SystemFixesMenu'
+    }
+    It 'Help text mentions /fix' {
+        $cmd | Should -Match '/fix.*Run system fix'
+    }
+    It 'Help text lists all fix targets' {
+        foreach ($target in @('dism', 'sfc', 'combo', 'chkdsk', 'proxy')) {
+            $cmd | Should -Match "$target" -Because "Help should list fix target: $target"
+        }
+    }
+    It 'DISM findstr uses /C: for literal phrase (no false positive)' {
+        # Regression: findstr without /C: treats tokens separately.
+        # "successfully repaired" without /C: matches "completed successfully".
+        $lines = ($cmd -split "`n") | Where-Object { $_ -match 'findstr.*successfully repaired' }
+        foreach ($line in $lines) {
+            $line | Should -Match '/C:' -Because "findstr must use /C: for literal match: $($line.Trim())"
+        }
+    }
+    It 'SFC checks _sfc_erl for non-zero exit code' {
+        $cmd | Should -Match '_sfc_erl.*neq 0'
+    }
+    It 'SFC non-zero exit code increments FAIL_COUNT' {
+        # When SFC fails with unrecognized output + non-zero exit, FAIL_COUNT should increase
+        $cmd | Should -Match 'FAIL.*SFC returned exit code'
+    }
+    It 'CHKDSK has confirmation prompt in interactive mode' {
+        $cmd | Should -Match 'Schedule CHKDSK on next reboot'
+    }
+    It 'CHKDSK skips prompt in CLI mode' {
+        $cmd | Should -Match '_CLI_MODE.*1.*goto :FixCHKDSK_Run'
+    }
+    It 'Fix flow targets exist for all 5 fixes' {
+        foreach ($label in @(':RunFixDISM', ':RunFixSFC', ':RunFixCombo', ':RunFixCHKDSK', ':RunFixProxy')) {
+            $escaped = [regex]::Escape($label)
+            $cmd | Should -Match $escaped -Because "Flow target $label should exist"
+        }
+    }
+    It 'Fix workload labels exist for all 4 commands' {
+        foreach ($label in @(':FixDISM', ':FixSFC', ':FixCHKDSK', ':FixProxy')) {
+            $escaped = [regex]::Escape($label)
+            $cmd | Should -Match $escaped -Because "Workload label $label should exist"
+        }
+    }
+    It 'Combo sets _STOP_AFTER to FixSFC (runs both DISM and SFC)' {
+        # RunFixCombo flow target should set _STOP_AFTER=FixSFC and goto :FixDISM
+        $lines = ($cmd -split "`n")
+        $comboIdx = $null
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            # Match the flow target label, not the CLI dispatch line
+            if ($lines[$i] -match '^:RunFixCombo') { $comboIdx = $i; break }
+        }
+        $comboIdx | Should -Not -BeNullOrEmpty
+        $nearby = $lines[($comboIdx)..($comboIdx+5)] -join "`n"
+        $nearby | Should -Match '_STOP_AFTER=FixSFC'
+        $nearby | Should -Match 'goto :FixDISM'
+    }
+}
+
+Describe 'Phase 13 — System Fixes (CLI integration)' {
+
+    Context '/fix with invalid target exits 1' {
+        BeforeAll {
+            $script:tmpDir = Join-Path $env:TEMP "rwu_fix_bad_$(Get-Random)"
+            New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+            # /testmode needed to bypass admin check which runs before arg dispatch
+            $script:result = Invoke-RwuCmd -Arguments @('/fix', 'bogus', '/testmode') -LogDir $tmpDir
+        }
+        AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+        It 'Exits with code 1' { $result.ExitCode | Should -Be 1 }
+        It 'Shows valid targets in error' {
+            $result.Stdout | Should -Match 'Valid targets.*dism.*sfc.*combo.*chkdsk.*proxy'
+        }
+    }
+
+    Context '/fix conflicts with /diag' {
+        BeforeAll {
+            $script:tmpDir = Join-Path $env:TEMP "rwu_fix_conflict_$(Get-Random)"
+            New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+            # /testmode needed to bypass admin check which runs before arg dispatch
+            $script:result = Invoke-RwuCmd -Arguments @('/diag', '/fix', 'sfc', '/testmode') -LogDir $tmpDir
+        }
+        AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+        It 'Exits with code 1' { $result.ExitCode | Should -Be 1 }
+        It 'Shows conflicting actions error' {
+            $result.Stdout | Should -Match 'Conflicting actions'
+        }
+    }
+
+    Context '/fix dism in testmode exits 0' {
+        BeforeAll {
+            $script:tmpDir = Join-Path $env:TEMP "rwu_fix_dism_$(Get-Random)"
+            New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+            $script:result = Invoke-RwuCmd -Arguments @('/fix', 'dism', '/testmode') -LogDir $tmpDir
+        }
+        AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+        It 'Exits with code 0' { $result.ExitCode | Should -Be 0 }
+        It 'Shows DISM run label' { $result.Stdout | Should -Match 'DISM Repair Component Store' }
+    }
+
+    Context '/fix sfc in testmode exits 0' {
+        BeforeAll {
+            $script:tmpDir = Join-Path $env:TEMP "rwu_fix_sfc_$(Get-Random)"
+            New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+            $script:result = Invoke-RwuCmd -Arguments @('/fix', 'sfc', '/testmode') -LogDir $tmpDir
+        }
+        AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+        It 'Exits with code 0' { $result.ExitCode | Should -Be 0 }
+        It 'Shows SFC run label' { $result.Stdout | Should -Match 'SFC System File Checker' }
+    }
+
+    Context '/fix combo in testmode exits 0' {
+        BeforeAll {
+            $script:tmpDir = Join-Path $env:TEMP "rwu_fix_combo_$(Get-Random)"
+            New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+            $script:result = Invoke-RwuCmd -Arguments @('/fix', 'combo', '/testmode') -LogDir $tmpDir
+        }
+        AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+        It 'Exits with code 0' { $result.ExitCode | Should -Be 0 }
+        It 'Shows combo run label' { $result.Stdout | Should -Match 'DISM \+ SFC Combo' }
+    }
+
+    Context '/fix chkdsk in testmode exits 0' {
+        BeforeAll {
+            $script:tmpDir = Join-Path $env:TEMP "rwu_fix_chkdsk_$(Get-Random)"
+            New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+            $script:result = Invoke-RwuCmd -Arguments @('/fix', 'chkdsk', '/testmode') -LogDir $tmpDir
+        }
+        AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+        It 'Exits with code 0' { $result.ExitCode | Should -Be 0 }
+        It 'Shows CHKDSK run label' { $result.Stdout | Should -Match 'Schedule CHKDSK' }
+    }
+
+    Context '/fix proxy in testmode exits 0' {
+        BeforeAll {
+            $script:tmpDir = Join-Path $env:TEMP "rwu_fix_proxy_$(Get-Random)"
+            New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+            $script:result = Invoke-RwuCmd -Arguments @('/fix', 'proxy', '/testmode') -LogDir $tmpDir
+        }
+        AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+        It 'Exits with code 0' { $result.ExitCode | Should -Be 0 }
+        It 'Shows proxy run label' { $result.Stdout | Should -Match 'Reset WinHTTP Proxy' }
+    }
+}
+
+Describe 'Phase 13 — System Fixes (TUI integration)' {
+
+    Context 'Main Menu → System Fixes → Back → Exit' {
+        BeforeAll {
+            $script:tmpDir = Join-Path $env:TEMP "rwu_tui_sysfix_$(Get-Random)"
+            New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+            # Key 9 = S (System Fixes), Key 6 = [0] Back, Key 10 = [0] Exit
+            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '9.6.10') -LogDir $tmpDir
+        }
+        AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+        It 'Exits with code 0' { $result.ExitCode | Should -Be 0 }
+        It 'Trace log shows SystemFixesMenu' {
+            $log = Get-Content (Join-Path $tmpDir 'RWU_Debug.log') -Raw -ErrorAction SilentlyContinue
+            $log | Should -Match 'SystemFixesMenu'
+        }
+        It 'Trace log shows return to MainMenu' {
+            $log = Get-Content (Join-Path $tmpDir 'RWU_Debug.log') -Raw -ErrorAction SilentlyContinue
+            $matches = [regex]::Matches($log, 'entering :MainMenu')
+            $matches.Count | Should -BeGreaterOrEqual 2
+        }
+    }
+
+    Context 'Main Menu → System Fixes → DISM (testmode) → Return → Exit' {
+        BeforeAll {
+            $script:tmpDir = Join-Path $env:TEMP "rwu_tui_fixdism_$(Get-Random)"
+            New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+            # Key 9 = S, Key 1 = DISM, Key 2 = Exit from StepDone, Key 10 = Exit from MainMenu
+            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '9.1.2.10') -LogDir $tmpDir
+        }
+        AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+        It 'Exits with code 0' { $result.ExitCode | Should -Be 0 }
+        It 'Trace log shows RunFixDISM' {
+            $log = Get-Content (Join-Path $tmpDir 'RWU_Debug.log') -Raw -ErrorAction SilentlyContinue
+            $log | Should -Match 'TESTMODE.*skip RunFixDISM'
+        }
+        It 'Output shows DISM run label' {
+            $result.Stdout | Should -Match 'DISM Repair Component Store'
         }
     }
 }
