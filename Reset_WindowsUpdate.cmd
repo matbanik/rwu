@@ -323,7 +323,79 @@ goto :MainMenu
 :: ============================================================
 
 :ShowHelp
-if not "!_CLI_MODE!"=="1" call :BlankScreen
+:: CLI mode: dump all help at once (terminal scrolls)
+if "!_CLI_MODE!"=="1" goto :ShowHelpFull
+:: Interactive mode: paginate across two screens
+call :Trace "entering :ShowHelp (interactive, page 1)"
+
+:: --- Page 1: Actions, Fix Targets, Step Numbers ---
+call :BlankScreen
+echo.
+echo  ================================================================
+echo     Windows Update Reset ^& Repair Tool  v%ver%  -  Help (1/2)
+echo  ================================================================
+echo.
+echo  INTERACTIVE: Run with no arguments for the menu UI.
+echo  CLI:         Reset_WindowsUpdate.cmd [action] [options]
+echo.
+echo  ACTIONS:                           STEP NUMBERS:
+echo   /diag      Diagnostics only        0    System Diagnostics
+echo   /reset     Full reset (0-14)       1-2  Stop services
+echo   /step N    Run specific step       3    Delete BITS queue
+echo   /fix T     Run system fix          4    Rename cache folders
+echo                                      5    Reset BITS queue
+echo  FIX TARGETS:                        6    Reset WU policies
+echo   dism    DISM RestoreHealth          7    Reset service SDDL
+echo   sfc     System File Checker         8    Re-register DLLs
+echo   combo   DISM then SFC              9-10 Network reset
+echo   chkdsk  Schedule disk check        11-14 or finalize
+echo   proxy   Reset WinHTTP proxy
+echo.
+echo  ================================================================
+echo.
+call :Choice /C:NM /N /M "  [N]ext page  [M]ain Menu: "
+if not defined _AUTOKEYS set "_erl=!errorlevel!"
+if !_erl!==2 goto :MainMenu
+
+:: --- Page 2: Options, Examples, Notes ---
+call :Trace "ShowHelp: page 2"
+call :BlankScreen
+echo.
+echo  ================================================================
+echo     Windows Update Reset ^& Repair Tool  v%ver%  -  Help (2/2)
+echo  ================================================================
+echo.
+echo  OPTIONS:
+echo   /policy    Enable policy reset
+echo   /sddl      Enable SDDL reset
+echo   /debug     Enable debug trace log
+echo   /logdir P  Set log folder
+echo:  /help /?   This help
+echo.
+echo  WARNING: /policy and /sddl bypass confirmation prompts.
+echo  They delete registry keys and overwrite service permissions.
+echo.
+echo  EXAMPLES:
+echo   Reset_WindowsUpdate.cmd /diag
+echo   Reset_WindowsUpdate.cmd /reset /policy /sddl
+echo   Reset_WindowsUpdate.cmd /step 3
+echo   Reset_WindowsUpdate.cmd /fix combo
+echo   Reset_WindowsUpdate.cmd /diag /logdir "C:\Temp"
+echo.
+echo  NOTES:
+echo   - Admin required (except /help). Log: WU_Reset_Log.txt
+echo   - Steps 6/7 skipped unless /policy or /sddl is set
+echo   - /logdir must exist; exclamation mark in path rejected
+echo   - CLI exits: 0=success, 1=failure, 2=warnings only
+echo.
+echo  ================================================================
+echo.
+echo     Press any key to return to Main Menu...
+if not "!_TESTMODE!"=="1" pause >nul
+goto :MainMenu
+
+:: --- CLI mode: single dump (no pagination) ---
+:ShowHelpFull
 echo.
 echo  ================================================================
 echo     Windows Update Reset ^& Repair Tool  v%ver%  -  Help
@@ -368,15 +440,8 @@ echo   - /logdir must exist; exclamation mark in path rejected
 echo   - CLI exits: 0=success, 1=failure, 2=warnings only
 echo.
 echo  ================================================================
-if "!_CLI_MODE!"=="1" (
-    endlocal
-    exit /b 0
-)
-call :Trace "ShowHelp: displayed, waiting for keypress"
-echo.
-echo     Press any key to return to Main Menu...
-if not "!_TESTMODE!"=="1" pause >nul
-goto :MainMenu
+endlocal
+exit /b 0
 
 :: --- Debug toggle ---
 :ToggleDebug

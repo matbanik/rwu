@@ -412,7 +412,8 @@ Describe 'Phase 7 — TUI Navigation (integration, no elevation)' {
         BeforeAll {
             $script:tmpDir = Join-Path $env:TEMP "rwu_tui_help_$(Get-Random)"
             New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
-            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '7.10') -LogDir $tmpDir
+            # Key 7 = Help, Key 2 = [M]ain Menu from help page 1, Key 10 = Exit
+            $script:result = Invoke-RwuCmd -Arguments @('/testmode', '/debug', '/autokeys', '7.2.10') -LogDir $tmpDir
         }
         AfterAll { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
 
