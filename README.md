@@ -108,7 +108,7 @@ Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-[GPL-3.0](LICENSE) — **Mat Banik** · [matbanik.info/reset-windows-update-guide](https://matbanik.info/reset-windows-update-guide)
+[GPL-3.0](LICENSE) — **Mat Banik** · [matbanik.info/reset-windows-update-guide](https://matbanik.info/hobbies/systems/posts/reset-windows-update-guide/)
 
 ---
 
