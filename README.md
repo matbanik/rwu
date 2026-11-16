@@ -1,19 +1,13 @@
-<p align="center">
-  <img src="assets/rover.webp" alt="Rover — RWU mascot" width="200">
-</p>
+<h1 align="center">
+  <img src="assets/rover.webp" alt="Rover — RWU mascot" width="96"><br>
+  RWU — Reset & Repair Utility for Windows Update
+</h1>
 
-# RWU — Reset & Repair Utility for Windows Update
+<p align="center"><strong>Fix a stuck Windows Update with one command.</strong></p>
 
-> Open-source Windows Update reset tool featuring comprehensive diagnostics, safe cache cleanup, DLL re-registration, and AI friendly log for analysis in a single script.
+## ▶ Run it now
 
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
-[![Windows 11](https://img.shields.io/badge/Windows-11-0078D6?logo=windows11&logoColor=white)](#requirements)
-[![Windows 10](https://img.shields.io/badge/Windows-10-0078D6?logo=windows&logoColor=white)](#requirements)
-
-## Quick Start
-
-1. Click the **Start Menu**, type **PowerShell**, and open it.
-2. Copy and paste the code below and press **Enter**.
+**Open PowerShell** (Start Menu → type `PowerShell` → **Enter**), then paste this and press **Enter**:
 
 ```powershell
 
@@ -21,10 +15,20 @@ irm https://matbanik.info/rwu | iex
 
 ```
 
-Or [download from Releases](https://github.com/matbanik/rwu/releases) → right-click → **Run as administrator**.
+Click **Yes** on the admin (UAC) prompt and follow the on-screen menu.
+
+<sub>Prefer not to paste commands? [Download from Releases](https://github.com/matbanik/rwu/releases) → right-click `Reset_WindowsUpdate.cmd` → **Run as administrator**.</sub>
 
 > [!NOTE]
-> `irm` downloads a tiny launcher; it fetches the tool from GitHub and runs it elevated (UAC prompt). Run `irm https://matbanik.info/rwu` alone to inspect the launcher first.
+> `irm` downloads a tiny launcher that fetches the tool from GitHub Releases, verifies its SHA256 hash, and runs it elevated. To read the launcher before running it, use `irm https://matbanik.info/rwu` without `| iex`.
+
+---
+
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
+[![Windows 11](https://img.shields.io/badge/Windows-11-0078D6?logo=windows11&logoColor=white)](#requirements)
+[![Windows 10](https://img.shields.io/badge/Windows-10-0078D6?logo=windows&logoColor=white)](#requirements)
+
+Open-source Windows Update reset tool with full diagnostics, safe cache cleanup, DLL re-registration, and an AI-friendly log for analysis, all in a single script.
 
 ## Features
 
