@@ -37,7 +37,12 @@ Thank you for your interest in improving this tool! Whether you're fixing a bug,
 
 #### Guidelines
 
-- **Test on a real Windows machine** (or VM) — batch scripts can't be unit-tested in isolation
+- **Run the Pester suite** — `tests/rwu.Tests.ps1` checks the scripts' text and runs blocks of the batch script against stub commands, without elevation (needs PowerShell 7 and Pester 5.4 or later):
+  ```powershell
+  pwsh -NoProfile -File tests/support/Invoke-RwuPester.ps1 -FullName '*' -MinTests 144 -AllowSkipped 3
+  ```
+- **Add a test for each change** — and, for a change to `release.yml`, run `python tests/support/test_release_workflow.py` (needs PyYAML)
+- **Run the full reset on a Windows VM** — the suite does not run an elevated reset
 - **Preserve safety defaults** — dangerous operations must remain OFF by default
 - **Log everything** — every action should be logged with timestamps
 - **Use errorlevel checks** — always check return codes and handle failures gracefully

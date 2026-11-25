@@ -6,26 +6,30 @@ on:
       - 'v*.*.*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Extract version from tag
         id: version
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          TAG="${{ github.ref_name }}"
           VERSION="${TAG#v}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Verify version matches script
+        env:
+          TAG_VER: ${{ steps.version.outputs.version }}
         run: |
           SCRIPT_VER=$(grep -oP 'set "ver=\K[0-9]+\.[0-9]+\.[0-9]+' Reset_WindowsUpdate.cmd)
-          TAG_VER="${{ steps.version.outputs.version }}"
           if [ "$SCRIPT_VER" != "$TAG_VER" ]; then
             echo "::error::Version mismatch! Script says $SCRIPT_VER but tag is v$TAG_VER"
             echo "Run: .\bump.ps1 $TAG_VER"
@@ -81,8 +85,15 @@ jobs:
           # Replace placeholder with actual hash (the launcher regex looks for "SHA256: <64hex>")
           sed -i "s/\$HASH_PLACEHOLDER/${{ steps.hash.outputs.sha256_cmd }}/" release_body.md
 
+      # The launcher must read the hash of the .cmd from this body, not another one
+      - name: Verify the hash that the launcher will read
+        shell: pwsh
+        env:
+          EXPECTED_HASH: ${{ steps.hash.outputs.sha256_cmd }}
+        run: ./.github/scripts/Test-ReleaseHash.ps1 -BodyPath release_body.md -LauncherPath rwu.ps1 -ExpectedHash $env:EXPECTED_HASH
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: "RWU v${{ steps.version.outputs.version }}"
           body_path: release_body.md
@@ -102,7 +113,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout RWU repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Verify rwu.ps1 exists
         run: |
@@ -113,7 +126,7 @@ jobs:
           echo "✅ rwu.ps1 found ($(wc -c < rwu.ps1) bytes)"
 
       - name: Checkout matbanik.info repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: matbanik/info
           token: ${{ secrets.MATBANIK_DEPLOY_TOKEN }}
@@ -141,10 +154,12 @@ jobs:
       - name: Commit and push to matbanik.info
         if: steps.sync.outputs.changed == 'true'
         working-directory: matbanik-site
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add public/rwu
-          git commit -m "chore: sync rwu.ps1 launcher from matbanik/rwu@${{ github.ref_name }}"
+          git commit -m "chore: sync rwu.ps1 launcher from matbanik/rwu@$TAG"
           git push
           echo "✅ Pushed to matbanik/info"

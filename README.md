@@ -36,7 +36,7 @@ Open-source Windows Update reset tool with full diagnostics, safe cache cleanup,
 |---------|---------|
 | 🔍 **14-step reset** | Stop services → clear caches → re-register DLLs → restart → verify |
 | 📋 **Interactive menu** | Full-screen TUI with color-coded toggles and step selection |
-| ⚡ **CLI mode** | `/diag`, `/reset`, `/step N` — exit codes `0`/`1`/`2` |
+| ⚡ **CLI mode** | `/diag`, `/reset`, `/step N`, `/fix T` — exit codes `0`/`1`/`2` |
 | 🤖 **AI-ready diagnostics** | Paste the log into ChatGPT, Copilot, or Claude for instant analysis |
 | 🛡️ **Safe by default** | Dangerous steps disabled; require explicit opt-in with confirmation |
 | 🔄 **Reversible** | Cache folders timestamped, registry keys exported before deletion |
@@ -56,6 +56,15 @@ Reset_WindowsUpdate.cmd /reset /policy /sddl
 
 # CLI: run a specific step
 Reset_WindowsUpdate.cmd /step 3
+
+# CLI: run a system fix (dism, sfc, combo, chkdsk or proxy)
+Reset_WindowsUpdate.cmd /fix combo
+
+# CLI: write the logs to an existing folder instead of the Desktop
+Reset_WindowsUpdate.cmd /diag /logdir "C:\Temp"
+
+# CLI: add a debug trace log
+Reset_WindowsUpdate.cmd /debug /diag
 
 # Full help
 Reset_WindowsUpdate.cmd /help

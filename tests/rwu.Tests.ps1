@@ -9,6 +9,8 @@
 # Pester 5 scoping: BeforeAll at file level runs before any Describe block.
 
 BeforeAll {
+    . (Join-Path $PSScriptRoot 'support\RwuBlockHarness.ps1')
+
     function Invoke-RwuCmd {
         <#
         .SYNOPSIS  Run Reset_WindowsUpdate.cmd with given arguments, return exit code + captured output.
@@ -45,6 +47,8 @@ BeforeAll {
         Get-Content (Join-Path $PSScriptRoot '..\rwu.ps1') -Raw
     }
 }
+
+AfterAll { Remove-RwuStubs }
 
 # ── Phase 0: Smoke ──────────────────────────────────────────────────────────
 
@@ -150,17 +154,8 @@ Describe 'Phase 3 — Step 6 Fail-Closed Backup' {
 Describe 'Phase 4 — Error Counting for Repair Commands' {
     BeforeAll { $script:cmd = Get-CmdFileContent }
 
-    It 'net stop has errorlevel checking' {
-        $cmd | Should -Match 'net stop.*\r?\n.*errorlevel'
-    }
-    It 'bitsadmin has errorlevel checking' {
-        $cmd | Should -Match 'bitsadmin.*\r?\n.*errorlevel'
-    }
     It 'netsh winsock reset has errorlevel checking' {
         $cmd | Should -Match 'netsh winsock reset.*\r?\n.*errorlevel'
-    }
-    It 'net start has errorlevel checking' {
-        $cmd | Should -Match 'net start.*\r?\n.*errorlevel'
     }
 }
 
@@ -365,9 +360,6 @@ Describe 'Phase 11 — Repair Command Failure Handling' {
     }
     It 'DNS flush checks exit code' {
         $cmd | Should -Match 'WARN.*DNS flush'
-    }
-    It 'Service restart distinguishes errorlevel 2 (already running) from real failures' {
-        $cmd | Should -Match '_svc_erl'
     }
 }
 
@@ -660,6 +652,42 @@ Describe 'Phase 13 — System Fixes (CLI integration)' {
     }
 }
 
+Describe 'Phase 14 — ASCII-only Shipped Scripts (encoding regression)' {
+    # Regression: a UTF-8 em-dash (E2 80 94) in an echo line rendered as
+    # "ΓÇö" in cmd.exe (OEM code page 437). BOM-less .ps1 files are also
+    # decoded as ANSI by Windows PowerShell 5.1. Shipped scripts must be
+    # pure 7-bit ASCII so they render identically on every code page.
+    It '<File> contains only 7-bit ASCII bytes' -TestCases @(
+        @{ File = 'Reset_WindowsUpdate.cmd' }
+        @{ File = 'rwu.ps1' }
+        @{ File = 'bump.ps1' }
+    ) {
+        param($File)
+        $path  = Join-Path $PSScriptRoot "..\$File"
+        $bytes = [System.IO.File]::ReadAllBytes($path)
+        $bad   = @()
+        $line  = 1
+        foreach ($b in $bytes) {
+            if ($b -eq 0x0A) { $line++ }
+            elseif ($b -gt 0x7F -and $bad -notcontains $line) { $bad += $line }
+        }
+        $bad | Should -BeNullOrEmpty -Because "non-ASCII bytes found on line(s): $($bad -join ', ')"
+    }
+    It '<File> has CRLF on every line' -TestCases @(
+        @{ File = 'Reset_WindowsUpdate.cmd' }
+        @{ File = 'rwu.ps1' }
+        @{ File = 'bump.ps1' }
+    ) {
+        $text = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "..\$File"))
+        [regex]::Matches($text, '(?<!\r)\n|\r(?!\n)').Count | Should -Be 0
+        $text.EndsWith("`r`n") | Should -BeTrue
+    }
+    It 'Reset_WindowsUpdate.cmd has no UTF-8 BOM (cmd.exe would fail on line 1)' {
+        $bytes = [System.IO.File]::ReadAllBytes((Join-Path $PSScriptRoot '..\Reset_WindowsUpdate.cmd'))
+        ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) | Should -BeFalse
+    }
+}
+
 Describe 'Phase 13 — System Fixes (TUI integration)' {
 
     Context 'Main Menu → System Fixes → Back → Exit' {
@@ -700,5 +728,910 @@ Describe 'Phase 13 — System Fixes (TUI integration)' {
         It 'Output shows DISM run label' {
             $result.Stdout | Should -Match 'DISM Repair Component Store'
         }
+    }
+}
+
+# ── Phase 15: Block Harness ─────────────────────────────────────────────────
+
+Describe 'Phase 15 — Block Harness and Gated Runner' {
+    BeforeAll {
+        $script:runner = Join-Path $PSScriptRoot 'support\Invoke-RwuPester.ps1'
+    }
+    It 'Every stubbed tool resolves to the stub directory under the child PATH' {
+        $dir = Initialize-RwuStubs
+        $out = Assert-RwuPreflight -StubDir $dir -ChildPath $dir -Cwd $TestDrive
+        foreach ($t in 'sc', 'net', 'reg', 'bitsadmin', 'regsvr32', 'ping', 'fltmc') {
+            $out | Should -Match ([regex]::Escape("$t.exe=$dir\$t.exe"))
+        }
+    }
+    It 'A block that calls a stubbed tool is recorded and never reaches the real tool' {
+        $r = Invoke-RwuBlock -Entry 'net stop RwuNoSuchService', 'sc query RwuNoSuchService' -Scenario @{ 'state.RwuNoSuchService' = '4' }
+        $r.Calls | Should -Be @('net stop RwuNoSuchService', 'sc query RwuNoSuchService')
+        $r.Output | Should -Match ': 1  STOPPED'
+    }
+    It 'With one stub removed the preflight throws and the call log stays empty' {
+        $bad = Join-Path $TestDrive 'stubs'
+        Copy-Item (Initialize-RwuStubs) $bad -Recurse
+        Remove-Item (Join-Path $bad 'net.exe')
+        { Invoke-RwuBlock -StubDir $bad -Entry 'sc query x' } | Should -Throw '*net.exe*calls=<>*'
+    }
+    It 'A tool that is not stubbed is "not recognized", not the real one' {
+        (Invoke-RwuBlock -Entry 'whoami').Output | Should -Match 'not recognized'
+    }
+    It 'Runner exits 1 for a pattern that matches nothing' {
+        & pwsh -NoProfile -File $runner -FullName 'no-such-phase' -MinTests 1 *> $null
+        $LASTEXITCODE | Should -Be 1
+    }
+    It 'Runner exit code for <Name> is <Code>' -TestCases @(
+        @{ Name = 'a passing file'; Body = "Describe 'x' { It 'a' { 1 | Should -Be 1 } }"; Code = 0 }
+        @{ Name = 'too few tests'; Body = "Describe 'x' { }"; Code = 1 }
+        @{ Name = 'a failing test'; Body = "Describe 'x' { It 'a' { 1 | Should -Be 1 }; It 'b' { 1 | Should -Be 2 } }"; Code = 1 }
+        @{ Name = 'a skipped test'; Body = "Describe 'x' { It 'a' { 1 | Should -Be 1 }; It 'b' -Skip { } }"; Code = 1 }
+        @{ Name = 'a failing block'; Body = "Describe 'x' { It 'a' { 1 | Should -Be 1 }; Context 'y' { AfterAll { throw 'z' }; It 'b' { } } }"; Code = 1 }
+        @{ Name = 'a broken container'; Body = "Describe 'x' { It 'a' { 1 | Should -Be 1 } }; throw 'boom'"; Code = 1 }
+    ) {
+        $f = Join-Path $TestDrive "$(Get-Random).Tests.ps1"
+        Set-Content $f $Body
+        & pwsh -NoProfile -File $runner -FullName '*' -MinTests 1 -Path $f *> $null
+        $LASTEXITCODE | Should -Be $Code
+    }
+}
+
+# ── Phase 16: Services ──────────────────────────────────────────────────────
+
+Describe 'Phase 16 — Service Stop and Start' {
+    BeforeAll {
+        function Get-Stopped($r) { @("$($r.Vars['_STOPPED_BY_RUN'])".Split(' ', [StringSplitOptions]::RemoveEmptyEntries)) }
+        function Get-NetCalls($r, $verb) { @($r.Calls | Where-Object { $_ -like "net $verb *" }) }
+        $script:allRunning = @{}
+        foreach ($s in 'wuauserv', 'UsoSvc', 'DoSvc', 'cryptSvc', 'bits', 'msiserver', 'appidsvc', 'TrustedInstaller') {
+            $allRunning["state.$s"] = '4'
+        }
+    }
+
+    Context 'SvcState and SvcStart' {
+        It 'SvcState maps <Name> to <Want>' -TestCases @(
+            @{ Name = 'a running service'; S = @{ 'state.bits' = '4' }; Want = '4' }
+            @{ Name = 'a non-English state label'; S = @{ 'state.bits' = '4'; 'label.state' = 'ESTADO' }; Want = '4' }
+            @{ Name = 'exit 1060'; S = @{ 'state.bits' = '0' }; Want = '0' }
+            @{ Name = 'exit 5'; S = @{ 'state.bits' = 'U' }; Want = 'U' }
+            @{ Name = 'unparsable output'; S = @{ 'state.bits' = 'X' }; Want = 'U' }
+            @{ Name = 'a stopped service with WIN32_EXIT_CODE 5'; S = @{ 'state.bits' = '1'; 'winexit.bits' = '5  (0x5)' }; Want = '1' }
+        ) {
+            (Invoke-RwuBlock -Entry 'call :SvcState bits' -Scenario $S).Vars['_SVC_STATE'] | Should -BeExactly $Want
+        }
+        It 'SvcStart maps Start <Reg> to <Want>' -TestCases @(
+            @{ Reg = '4'; Want = '4' }
+            @{ Reg = '2'; Want = '2' }
+            @{ Reg = ''; Want = 'U' }
+        ) {
+            (Invoke-RwuBlock -Entry 'call :SvcStart bits' -Scenario @{ 'start.bits' = $Reg }).Vars['_SVC_START'] | Should -BeExactly $Want
+        }
+    }
+
+    Context 'Step 2 stop' {
+        It 'net stop exit 2 with wuauserv still running is a warning' {
+            $r = Invoke-RwuBlock -Steps Step2 -Scenario @{ 'state.wuauserv' = '4'; 'netstop.wuauserv' = 2 }
+            $r.Vars.WARN_COUNT | Should -Be 1
+            $r.Log | Should -Match 'WARN: wuauserv did not stop'
+        }
+        It 'a protected service that refuses the stop is INFO (<_>)' -ForEach 'DoSvc', 'appidsvc' {
+            $r = Invoke-RwuBlock -Steps Step2 -Scenario @{ "state.$_" = '4'; "netstop.$_" = 2 }
+            $r.Vars.WARN_COUNT | Should -Be 0
+            $r.Log | Should -Match "INFO: $_ is protected"
+        }
+        It 'a stop that never leaves STOP_PENDING is a warning after five polls' {
+            $r = Invoke-RwuBlock -Steps Step2 -Scenario @{ 'state.bits' = '4'; 'netstop.bits.sets' = 'bits:3' }
+            $r.Vars.WARN_COUNT | Should -Be 1
+            @($r.Calls | Where-Object { $_ -eq 'ping -n 2 127.0.0.1' }).Count | Should -Be 5
+        }
+        It 'a stop that settles while polling is not a warning' {
+            $r = Invoke-RwuBlock -Steps Step2 -Scenario @{ 'state.bits' = '4'; 'netstop.bits.sets' = 'bits:3,3,3,3,1' }
+            $r.Vars.WARN_COUNT | Should -Be 0
+            Get-Stopped $r | Should -Be @('bits')
+        }
+        It 'an unknown state is a warning' {
+            (Invoke-RwuBlock -Steps Step2 -Scenario @{ 'state.bits' = 'U' ; 'netstop.bits.sets' = 'bits:U' }).Vars.WARN_COUNT | Should -Be 1
+        }
+        It 'a missing or stopped service gets no net stop and no warning' {
+            $r = Invoke-RwuBlock -Steps Step2 -Scenario @{ 'state.bits' = '0' }
+            $r.Vars.WARN_COUNT | Should -Be 0
+            Get-NetCalls $r stop | Should -HaveCount 0
+            $r.Log | Should -Match 'INFO: bits is not installed'
+            $r.Log | Should -Match 'INFO: wuauserv already stopped'
+        }
+        It 'all running services are stopped in STOP_ORDER' {
+            $r = Invoke-RwuBlock -Steps Step2 -Scenario $allRunning
+            Get-NetCalls $r stop | Should -Be @('wuauserv', 'UsoSvc', 'DoSvc', 'cryptSvc', 'bits', 'msiserver', 'appidsvc', 'TrustedInstaller' |
+                    ForEach-Object { "net stop $_ /y" })
+            (Get-Stopped $r).Count | Should -Be 8
+            $r.Vars.WARN_COUNT | Should -Be 0
+        }
+        It 'a dependant stopped by cryptSvc is in the set, and gets no second stop' {
+            $r = Invoke-RwuBlock -Steps Step2 -Scenario @{
+                'state.cryptSvc' = '4'; 'state.appidsvc' = '4'; 'netstop.cryptSvc.sets' = 'cryptSvc:1;appidsvc:1'
+            }
+            Get-Stopped $r | Should -Be @('cryptSvc', 'appidsvc')
+            Get-NetCalls $r stop | Should -Be @('net stop cryptSvc /y')
+        }
+        It 'a service that was already stopped, or did not stop, is not in the set' {
+            $r = Invoke-RwuBlock -Steps Step2 -Scenario @{ 'state.bits' = '4'; 'state.DoSvc' = '4'; 'netstop.DoSvc' = 2 }
+            Get-Stopped $r | Should -Be @('bits')
+        }
+        It 'a second run in the same process keeps the set and adds nothing twice' {
+            $r = Invoke-RwuBlock -Steps Step2 -Scenario @{ 'state.bits' = '4' } -Vars @{ _STOPPED_BY_RUN = ' bits msiserver ' }
+            Get-Stopped $r | Should -Be @('bits', 'msiserver')
+        }
+    }
+
+    Context 'Step 11 start' {
+        It 'starts the core services in order and no on-demand service' {
+            $r = Invoke-RwuBlock -Steps Step11 -Scenario @{ 'start.appidsvc' = 3 }
+            Get-NetCalls $r start | Should -Be @('cryptSvc', 'bits', 'DoSvc', 'UsoSvc', 'wuauserv' | ForEach-Object { "net start $_" })
+            $r.Vars.WARN_COUNT | Should -Be 0
+        }
+        It 'starts appidsvc when its Start is 2' {
+            Get-NetCalls (Invoke-RwuBlock -Steps Step11 -Scenario @{ 'start.appidsvc' = 2 }) start | Should -Contain 'net start appidsvc'
+        }
+        It 'starts exactly the on-demand services that this run stopped, and empties the set' {
+            $r = Invoke-RwuBlock -Steps Step11 -Vars @{ _STOPPED_BY_RUN = ' wuauserv msiserver TrustedInstaller ' }
+            @(Get-NetCalls $r start)[5..9] | Should -Be @('net start msiserver', 'net start TrustedInstaller')
+            Get-Stopped $r | Should -HaveCount 0
+        }
+        It 'issues no net start when everything runs' {
+            $r = Invoke-RwuBlock -Steps Step11 -Scenario ($allRunning + @{ 'start.appidsvc' = 2 })
+            Get-NetCalls $r start | Should -HaveCount 0
+            $r.Log | Should -Match 'INFO: bits already running'
+        }
+        It 'a service that is not installed is INFO' {
+            $r = Invoke-RwuBlock -Steps Step11 -Scenario @{ 'state.UsoSvc' = '0' }
+            $r.Vars.WARN_COUNT | Should -Be 0
+            $r.Log | Should -Match 'INFO: UsoSvc is not installed'
+        }
+        It 'net start exit 2 with the service stopped is a warning' {
+            (Invoke-RwuBlock -Steps Step11 -Scenario @{ 'netstart.bits' = 2 }).Vars.WARN_COUNT | Should -Be 1
+        }
+        It 'net start exit 2 with the service running is not a warning' {
+            (Invoke-RwuBlock -Steps Step11 -Scenario @{ 'netstart.bits' = 2; 'netstart.bits.sets' = 'bits:4' }).Vars.WARN_COUNT | Should -Be 0
+        }
+        It 'START_PENDING then RUNNING is OK' {
+            $r = Invoke-RwuBlock -Steps Step11 -Scenario @{ 'netstart.bits.sets' = 'bits:2,2,2,2,4' }
+            $r.Vars.WARN_COUNT | Should -Be 0
+            $r.Log | Should -Match 'OK: bits is running'
+        }
+        It 'the set from Step 2 drives Step 11' {
+            $r = Invoke-RwuBlock -Steps Step2, Step11 -Scenario @{ 'state.msiserver' = '4' }
+            Get-NetCalls $r start | Should -Contain 'net start msiserver'
+            Get-NetCalls $r start | Should -Not -Contain 'net start TrustedInstaller'
+        }
+    }
+
+    Context 'Disabled services' {
+        It 'Step 11 warns with 0x80070422 for <_>, tries nothing and changes nothing' -ForEach 'wuauserv', 'bits', 'cryptSvc', 'UsoSvc' {
+            $r = Invoke-RwuBlock -Steps Step11 -Scenario @{ "start.$_" = 4 }
+            $r.Vars.WARN_COUNT | Should -Be 1
+            $r.Log | Should -Match '0x80070422'
+            $r.Log | Should -Match "sc config $_ start="
+            Get-NetCalls $r start | Should -Not -Contain "net start $_"
+            $r.Calls | Where-Object { $_ -like 'sc config*' } | Should -BeNullOrEmpty
+        }
+        It 'a disabled DoSvc is INFO only' {
+            $r = Invoke-RwuBlock -Steps Step11 -Scenario @{ 'start.DoSvc' = 4 }
+            $r.Vars.WARN_COUNT | Should -Be 0
+            $r.Log | Should -Match 'INFO: DoSvc is disabled'
+            Get-NetCalls $r start | Should -Not -Contain 'net start DoSvc'
+        }
+        It 'a service without a Start value is not treated as disabled' {
+            Get-NetCalls (Invoke-RwuBlock -Steps Step11) start | Should -Contain 'net start wuauserv'
+        }
+        It 'Step 1 records a FINDING for each disabled member of the check list only' {
+            $r = Invoke-RwuBlock -Steps Step1 -Vars @{ _STOP_AFTER = 'Step1' } -Scenario @{
+                'start.wuauserv' = 4; 'start.UsoSvc' = 4; 'start.DoSvc' = 4; 'start.bits' = 3
+            }
+            $r.Vars.DIAG_FINDINGS | Should -Be 2
+            $r.Log | Should -Match 'FINDING: wuauserv is disabled'
+            $r.Log | Should -Not -Match 'FINDING: DoSvc'
+        }
+    }
+
+    It '<_> logs numeric state and start on a non-English system' -ForEach 'Step1', 'Step12' {
+        $r = Invoke-RwuBlock -Steps $_ -Vars @{ _STOP_AFTER = $_ } -Scenario @{
+            'state.bits' = '4'; 'label.state' = 'ESTADO'; 'start.bits' = 3; 'state.msiserver' = '0'
+        }
+        $r.Log | Should -Match 'bits: state=4 start=3'
+        $r.Log | Should -Match 'msiserver: state=0 start=U'
+    }
+}
+
+# ── Phase 17: BITS ──────────────────────────────────────────────────────────
+
+Describe 'Phase 17 — BITS Queue Reset' {
+    BeforeAll {
+        function Get-BitsCalls($r) { @($r.Calls | Where-Object { $_ -like 'bitsadmin*' }) }
+    }
+    It 'Step 5 in the full flow defers the reset and makes no bitsadmin call' {
+        $r = Invoke-RwuBlock -Steps Step5
+        Get-BitsCalls $r | Should -HaveCount 0
+        $r.Vars._BITS_RESET_PENDING | Should -Be 1
+        $r.Log | Should -Match 'deferred'
+    }
+    It '/step 5 calls bitsadmin once, even after a full reset in the same process' {
+        $r = Invoke-RwuBlock -Steps Step5 -Vars @{ _FULLRESET = 1; _STOP_AFTER = 'Step5' }
+        Get-BitsCalls $r | Should -Be @('bitsadmin /reset /allusers')
+        $r.Vars._BITS_RESET_PENDING | Should -Be 0
+        $r.Vars.WARN_COUNT | Should -Be 0
+    }
+    It '/step 5 warns when bitsadmin fails' {
+        (Invoke-RwuBlock -Steps Step5 -Vars @{ _STOP_AFTER = 'Step5' } -Scenario @{ 'exit.bitsadmin' = 1 }).Vars.WARN_COUNT | Should -Be 1
+    }
+    It 'The deferred reset runs once in Step 11, after net start bits' {
+        $r = Invoke-RwuBlock -Steps Step5, Step11
+        Get-BitsCalls $r | Should -HaveCount 1
+        $r.Calls.IndexOf('bitsadmin /reset /allusers') | Should -BeGreaterThan $r.Calls.IndexOf('net start bits')
+        $r.Vars._BITS_RESET_PENDING | Should -Be 0
+        $r.Vars.WARN_COUNT | Should -Be 0
+    }
+    It 'Step 11 resets a queue whose service already runs' {
+        Get-BitsCalls (Invoke-RwuBlock -Steps Step11 -Vars @{ _BITS_RESET_PENDING = 1 } -Scenario @{ 'state.bits' = '4' }) | Should -HaveCount 1
+    }
+    It 'Step 11 without the flag (/step finalize) never calls bitsadmin' {
+        Get-BitsCalls (Invoke-RwuBlock -Steps Step11) | Should -HaveCount 0
+    }
+    It 'When bits does not start there is no call, one more warning, and the flag is cleared' {
+        $r = Invoke-RwuBlock -Steps Step11 -Vars @{ _BITS_RESET_PENDING = 1 } -Scenario @{ 'netstart.bits' = 1 }
+        Get-BitsCalls $r | Should -HaveCount 0
+        $r.Vars.WARN_COUNT | Should -Be 2
+        $r.Log | Should -Match 'WARN: BITS queue not reset'
+        $r.Vars._BITS_RESET_PENDING | Should -Be 0
+    }
+    It 'A failing deferred bitsadmin is a warning' {
+        (Invoke-RwuBlock -Steps Step11 -Vars @{ _BITS_RESET_PENDING = 1 } -Scenario @{ 'exit.bitsadmin' = 1 }).Vars.WARN_COUNT | Should -Be 1
+    }
+    It ':FullReset clears a stale flag' {
+        # testmode, so the entry sets its variables and stops
+        (Invoke-RwuBlock -Entry 'goto :FullReset' -Vars @{ _BITS_RESET_PENDING = 1; _TESTMODE = 1 }).Vars._BITS_RESET_PENDING | Should -Be 0
+    }
+}
+
+# ── Phase 18: DLL registration ──────────────────────────────────────────────
+
+Describe 'Phase 18 — DLL Registration' {
+    BeforeAll {
+        $block = Get-RwuLabelBlock -Lines ((Get-RwuScriptText) -split '\r?\n') -Label Step8
+        $script:dlls = @([regex]::Matches(($block -join "`n"), '\b\w+\.dll\b').Value | Select-Object -Unique)
+    }
+    It 'All 36 DLLs are offered to regsvr32' {
+        $r = Invoke-RwuBlock -Steps Step8 -Dll $dlls
+        $dlls.Count | Should -Be 36
+        $r.Calls.Count | Should -Be 36
+        $r.Vars.DLL_OK | Should -Be 36
+        $r.Vars.WARN_COUNT | Should -Be 0
+    }
+    It 'regsvr32 exit <Code> counts as <Counter>, warnings <Warn>' -TestCases @(
+        @{ Code = 0; Counter = 'DLL_OK'; Warn = 0; Text = '' }
+        @{ Code = 1; Counter = 'DLL_FAIL'; Warn = 1; Text = 'FAIL: .*atl\.dll' }
+        @{ Code = 2; Counter = 'DLL_FAIL'; Warn = 1; Text = 'FAIL: .*atl\.dll' }
+        @{ Code = 3; Counter = 'DLL_FAIL'; Warn = 1; Text = 'FAIL: .*atl\.dll' }
+        @{ Code = 4; Counter = 'DLL_SKIP'; Warn = 0; Text = 'SKIP: atl\.dll' }
+        @{ Code = 5; Counter = 'DLL_INFO'; Warn = 0; Text = 'INFO: .*atl\.dll' }
+        @{ Code = 9; Counter = 'DLL_FAIL'; Warn = 1; Text = 'FAIL: .*atl\.dll' }
+        @{ Code = -1; Counter = 'DLL_FAIL'; Warn = 1; Text = 'FAIL: .*atl\.dll' }
+    ) {
+        $r = Invoke-RwuBlock -Steps Step8 -Dll atl.dll -Scenario @{ 'regsvr32.atl.dll' = $Code }
+        $want = @{ DLL_OK = 0; DLL_SKIP = 35; DLL_INFO = 0; DLL_FAIL = 0 }   # 35 files are absent
+        $want[$Counter]++
+        foreach ($k in $want.Keys) { $r.Vars[$k] | Should -Be $want[$k] -Because $k }
+        $r.Vars.WARN_COUNT | Should -Be $Warn
+        $r.Log | Should -Match $Text
+        $r.Log | Should -Match "DLL Summary: $($want.DLL_OK) registered, $($want.DLL_SKIP) skipped, $($want.DLL_INFO) informational, $($want.DLL_FAIL) failed"
+    }
+    It 'The current directory is restored with _STOP_AFTER=<_>' -ForEach 'Step8', 'Step14' {
+        $r = Invoke-RwuBlock -Steps Step8 -Vars @{ _STOP_AFTER = $_ }
+        $r.Cwd | Should -Be $r.Work
+    }
+    It 'A relative log written after Step 8 lands beside the earlier file' {
+        $r = Invoke-RwuBlock -Steps Step8, Step12 -Dll $dlls -Vars @{ LOGFILE = 'log.txt' }
+        $r.LogFiles | Should -Be @('work\log.txt')
+        $r.Log | Should -Match '\[STEP 12\]'
+    }
+}
+
+# ── Phase 19: Log paths ─────────────────────────────────────────────────────
+
+Describe 'Phase 19 — Log Paths' {
+    BeforeAll {
+        $script:shipped = (Resolve-Path (Join-Path $PSScriptRoot '..\Reset_WindowsUpdate.cmd')).Path
+        # The real script in test mode: no workload, no elevation.
+        function Invoke-TestMode([string]$Arguments, [string]$Cwd, [hashtable]$Env = @{}) {
+            Invoke-RwuProcess -CommandLine "`"$shipped`" /testmode $Arguments" -Cwd $Cwd -Env $Env
+        }
+    }
+
+    Context '/logdir' {
+        It '/logdir <Arg> gives absolute log paths that survive a directory change' -TestCases @(
+            @{ Arg = '.'; Sub = '' }
+            @{ Arg = '.\logs'; Sub = '\logs' }
+            @{ Arg = 'logs\'; Sub = '\logs' }
+            @{ Arg = '"logs\"'; Sub = '\logs' }
+        ) {
+            $r = Invoke-RwuBlock -Vars @{ _TESTMODE = 1; LOGFILE = 'unset'; DEBUGLOG = 'unset' } -Entry 'md logs',
+            "call :ParseArgs /diag /logdir $Arg", 'cd /d "%windir%"', 'echo AFTER>>"!LOGFILE!"', 'echo AFTER>>"!DEBUGLOG!"'
+            $r.Vars.LOGFILE | Should -Be "$($r.Work)$Sub\WU_Reset_Log.txt"
+            $r.Vars.DEBUGLOG | Should -Be "$($r.Work)$Sub\RWU_Debug.log"
+            $r.LogFiles | Should -Be @("work$Sub\WU_Reset_Log.txt")
+        }
+        It '/logdir <_> gives logs in the drive root' -ForEach 'C:\', '"C:\"' {
+            $r = Invoke-RwuBlock -Vars @{ _TESTMODE = 1 } -Entry "call :ParseArgs /diag /logdir $_"
+            $r.Vars.LOGFILE | Should -Be 'C:\WU_Reset_Log.txt'
+            $r.Vars.DEBUGLOG | Should -Be 'C:\RWU_Debug.log'
+        }
+        It '/logdir .\logs on the shipped script writes both logs there' {
+            $w = New-Item -ItemType Directory (Join-Path $TestDrive 'w1\logs') -Force
+            (Invoke-TestMode '/debug /diag /logdir .\logs' -Cwd $w.Parent.FullName).ExitCode | Should -Be 0
+            (Get-ChildItem $w).Name | Sort-Object | Should -Be @('RWU_Debug.log', 'WU_Reset_Log.txt')
+        }
+        It '/logdir with <Name> exits 1 with an error' -TestCases @(
+            @{ Name = 'a missing folder'; Arg = '/diag /logdir nope'; Text = 'does not exist' }
+            @{ Name = 'a wildcard'; Arg = '/diag /logdir "we*"'; Text = 'does not exist' }
+            @{ Name = 'a file'; Arg = '/diag /logdir file.txt'; Text = 'does not exist' }
+            @{ Name = 'no value'; Arg = '/diag /logdir'; Text = 'requires a path' }
+            @{ Name = 'a path with !'; Arg = '/diag /logdir "we!rd"'; Text = "cannot contain '!'" }
+            @{ Name = 'a path with two !'; Arg = '/diag /logdir "a!b!c"'; Text = "cannot contain '!'" }
+        ) {
+            $w = (New-Item -ItemType Directory (Join-Path $TestDrive "w_$(Get-Random)")).FullName
+            # werd, ac: what the mangled names would hit
+            foreach ($d in 'we!rd', 'werd', 'a!b!c', 'ac') { [void](New-Item -ItemType Directory (Join-Path $w $d)) }
+            Set-Content (Join-Path $w 'file.txt') 'x'
+            $r = Invoke-TestMode $Arg -Cwd $w
+            $r.ExitCode | Should -Be 1
+            $r.Output | Should -Match 'ERROR'
+            $r.Output | Should -Match ([regex]::Escape($Text))
+            @(Get-ChildItem $w -Recurse -File).Count | Should -Be 1
+        }
+        It 'A value after /logdir is not lost, and later options still work' {
+            $w = New-Item -ItemType Directory (Join-Path $TestDrive 'a & b (c)') -Force
+            (Invoke-TestMode "/logdir `"$($w.FullName)`" /debug /diag" -Cwd $TestDrive).ExitCode | Should -Be 0
+            Join-Path $w.FullName 'RWU_Debug.log' | Should -Exist
+        }
+    }
+
+    Context 'Change Log Output Folder' {
+        BeforeAll {
+            function Invoke-ChangeFolder([string[]]$Typed) {
+                $f = Join-Path $TestDrive "in_$(Get-Random).txt"
+                [IO.File]::WriteAllText($f, ($Typed -join "`r`n") + "`r`n")
+                Invoke-RwuBlock -Vars @{ LOGFILE = 'unset'; DEBUGLOG = 'unset' } -Entry 'md logs', "call :ChangeLogFolder < `"$f`""
+            }
+        }
+        It 'Typed <Typed> sets both variables' -TestCases @(
+            @{ Typed = '.\logs'; Want = '<work>\logs' }
+            @{ Typed = '"logs\"'; Want = '<work>\logs' }
+            @{ Typed = 'C:\'; Want = 'C:' }
+        ) {
+            $r = Invoke-ChangeFolder $Typed
+            $Want = $Want.Replace('<work>', $r.Work)
+            $r.Vars.LOGFILE | Should -Be "$Want\WU_Reset_Log.txt"
+            $r.Vars.DEBUGLOG | Should -Be "$Want\RWU_Debug.log"
+            $r.Output | Should -Match 'HARNESS-GOTO MainMenu'
+        }
+        It 'Typed <Typed> re-prompts and changes nothing' -TestCases @(
+            @{ Typed = 'we!rd'; Text = "cannot contain '!'" }
+            @{ Typed = 'nope'; Text = 'does not exist' }
+        ) {
+            # pause takes one character (x) from the redirected input
+            $r = Invoke-ChangeFolder $Typed, 'x0'
+            $r.Output | Should -Match ([regex]::Escape($Text))
+            ([regex]::Matches($r.Output, 'New folder path')).Count | Should -BeGreaterThan 1
+            $r.Vars.LOGFILE | Should -Be 'unset'
+            $r.Vars.DEBUGLOG | Should -Be 'unset'
+        }
+    }
+
+    Context '! in the profile path' {
+        BeforeAll {
+            $script:bang = Join-Path $TestDrive 'pro!file'
+            $script:plain = Join-Path $TestDrive 'profile'
+            [void](New-Item -ItemType Directory "$bang\Desktop", "$plain\Desktop" -Force)
+            # Everything above :ParseArgs, with markers for the labels it can reach.
+            function Invoke-Startup([string]$Arguments, [int]$Fltmc, [string]$Text = (Get-RwuScriptText)) {
+                $top = ($Text -replace '(?s)\r?\n:ParseArgs\s.*$', '') -split '\r?\n'
+                $top += ':ParseArgs', 'echo REACHED', 'set LOGFILE', 'set DEBUGLOG', 'exit /b 0', ':ShowHelp', 'echo HELP', 'exit /b 0',
+                ':MainMenu', 'echo MENU', 'exit /b 0', ':Trace', ':DebugInit', 'exit /b 0'
+                $d = Join-Path $TestDrive "st_$(Get-Random)"
+                [void](New-Item -ItemType Directory $d)
+                [IO.File]::WriteAllText("$d\st.cmd", ($top -join "`r`n") + "`r`n")
+                [IO.File]::WriteAllText("$d\scen.txt", "exit.fltmc=$Fltmc`n")
+                $stub = Initialize-RwuStubs
+                [void](Assert-RwuPreflight -StubDir $stub -ChildPath $stub -Cwd $d)
+                Invoke-RwuProcess -CommandLine "`"$d\st.cmd`" $Arguments" -Cwd $d -Env @{
+                    PATH = $stub; USERPROFILE = $bang; RWU_STUB_LOG = "$d\calls.txt"; RWU_STUB_SCENARIO = "$d\scen.txt"
+                }
+            }
+            # STARTUP_ORDER mutant: expansion enabled only after the admin guard.
+            $t = Get-RwuScriptText
+            $script:late = $t.Replace("setlocal EnableDelayedExpansion`r`n", '').Replace(":: Generate timestamp for backups", "setlocal EnableDelayedExpansion`r`n:: Generate timestamp for backups")
+        }
+        It 'Elevated start continues with the right log paths' {
+            $r = Invoke-Startup '/diag' 0
+            $r.Output | Should -Match 'REACHED'
+            $r.Output | Should -Match ([regex]::Escape("LOGFILE=$bang\Desktop\WU_Reset_Log.txt"))
+            $r.Output | Should -Match ([regex]::Escape("DEBUGLOG=$bang\Desktop\RWU_Debug.log"))
+        }
+        It 'Not elevated: admin error, exit 1' {
+            $r = Invoke-Startup '/diag' 1
+            $r.ExitCode | Should -Be 1
+            $r.Output | Should -Match 'must be run as Administrator'
+            $r.Output | Should -Not -Match 'REACHED'
+        }
+        It 'Not elevated with /testmode continues' {
+            (Invoke-Startup '/testmode' 1).Output | Should -Match 'REACHED'
+        }
+        It 'Not elevated with /help shows help, exit 0' {
+            $r = Invoke-Startup '/help' 1
+            $r.Output | Should -Match 'HELP'
+            $r.ExitCode | Should -Be 0
+        }
+        It 'Not elevated without arguments: error, and an empty stdin cannot hang' {
+            (Invoke-Startup '' 1).ExitCode | Should -Be 1
+        }
+        It 'A mutant that enables expansion after the guard fails for <Arg>, fltmc <Fltmc>' -TestCases @(
+            @{ Arg = '/diag'; Fltmc = 0 }
+            @{ Arg = '/testmode'; Fltmc = 1 }
+        ) {
+            $r = Invoke-Startup $Arg $Fltmc -Text $late
+            $r.Output | Should -Not -Match 'REACHED'
+            $r.Output | Should -Match 'must be run as Administrator'
+        }
+        It '/testmode /debug /diag writes the logs in that profile, not in the mangled one' {
+            (Invoke-TestMode '/debug /diag' -Cwd $TestDrive -Env @{ USERPROFILE = $bang }).ExitCode | Should -Be 0
+            (Get-ChildItem "$bang\Desktop").Name | Sort-Object | Should -Be @('RWU_Debug.log', 'WU_Reset_Log.txt')
+            Get-ChildItem $plain -Recurse -File | Should -BeNullOrEmpty
+        }
+        It 'A logging block writes there, also from a pipe' {
+            $log = "$bang\Desktop\block.txt"
+            [void](Invoke-RwuBlock -Steps Step1 -Vars @{ LOGFILE = $log; _STOP_AFTER = 'Step1' })
+            $log | Should -Exist
+            $c = Get-Content $log -Raw
+            $c | Should -Match 'START_TYPE\s+: 3'
+            $c | Should -Match 'state=1 start=U'
+            Get-ChildItem $plain -Recurse -File | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'No %VAR% use of LOGFILE, DEBUGLOG, DESKTOP or TEMP after delayed expansion is enabled' {
+        $t = Get-RwuScriptText
+        $after = $t.Substring($t.IndexOf("`nsetlocal EnableDelayedExpansion")) -split '\r?\n'
+        $bad = $after | Where-Object { $_ -notmatch '^\s*(::|rem\b)' -and $_ -match '(?i)%(LOGFILE|DEBUGLOG|DESKTOP|TEMP)[%:]' }
+        $bad | Should -BeNullOrEmpty
+    }
+}
+
+
+# ── Phase 20: Connectivity probes ───────────────────────────────────────────
+
+Describe 'Phase 20 — Connectivity' {
+    Context 'https probe (AC-19)' {
+        It 'Issuer <Dn>, status <Status>: fails, 1 finding' -TestCases @(
+            @{ Dn = 'CN=Contoso TLS Inspection, O=Contoso'; Status = 200 }
+            @{ Dn = 'CN=x, O=Microsoft Corporation Ltd'; Status = 200 }
+            @{ Dn = 'CN=x, O=microsoft corporation'; Status = 200 }
+            @{ Dn = ''; Status = 200 }
+            @{ Dn = 'CN=Microsoft Update Test, O=Microsoft Corporation, C=US'; Status = 403 }
+        ) {
+            $r = Invoke-RwuStep13 -HttpsDn $Dn -HttpsReply "$Status|text/html"
+            $r.ProbeExits.Count | Should -Be 2
+            $r.ProbeExits[0] | Should -Not -Be 0
+            $r.ProbeExits[1] | Should -Be 0
+            $r.Https.Requests | Should -Be 1
+            $r.Vars._conn_fail | Should -Be '1'
+            $r.Vars.DIAG_FINDINGS | Should -Be '1'
+            $r.Findings | Should -Be 1
+            $r.Log | Should -Match "Status: $Status"
+        }
+        It 'Issuer <Dn>, status 200: passes, no finding' -TestCases @(
+            @{ Dn = 'CN=Microsoft Update Test, O=Microsoft Corporation, C=US' }
+            @{ Dn = 'O=Microsoft Corporation' }
+        ) {
+            $r = Invoke-RwuStep13 -HttpsDn $Dn
+            $r.ProbeExits | Should -Be @(0, 0)
+            $r.Vars._conn_fail | Should -Be '0'
+            $r.Vars.DIAG_FINDINGS | Should -Be '0'
+            $r.Findings | Should -Be 0
+            $r.Log | Should -Match 'Status: 200'
+            $r.Log | Should -Match ([regex]::Escape('O=Microsoft Corporation'))
+        }
+        It 'Mutant that <Name> changes the O=Contoso result' -TestCases @(
+            @{ Name = 'drops the issuer condition'; From = " -and `$i -cmatch '(^|, )O=Microsoft Corporation(,|`$)'"; ProbeExit = 0 }
+            @{ Name = 'ignores the probe exit code'; From = 'if !errorlevel! neq 0 set "_conn_fail=1"'; ProbeExit = 1 }
+        ) {
+            $t = Get-RwuScriptText
+            $t.Contains($From) | Should -BeTrue
+            $r = Invoke-RwuStep13 -HttpsDn 'CN=x, O=Contoso' -Text $t.Replace($From, '')
+            $r.ProbeExits[0] | Should -Be $ProbeExit
+            $r.Findings | Should -Be 0
+        }
+        It 'An untrusted chain is a TrustFailure with 1 connection, and fails' {
+            $r = Invoke-RwuStep13 -NoPrologue
+            $r.Https.Connections | Should -Be 1
+            $r.Https.Requests | Should -Be 0
+            $r.ProbeExits[0] | Should -Not -Be 0
+            $r.Log | Should -Match 'TrustFailure'
+            $r.Findings | Should -Be 1
+        }
+        It 'The seam refuses a text without exactly one probe literal' {
+            $t = Get-RwuScriptText
+            { Invoke-RwuStep13 -Text $t.Replace('fe2cr.', 'other.') } | Should -Throw '*occurs 0 times*'
+            { Invoke-RwuStep13 -Text ($t + $t) } | Should -Throw '*occurs 2 times*'
+        }
+    }
+
+    Context 'http probe (AC-20)' {
+        It '<Reply> fails' -TestCases @(
+            @{ Reply = '403|application/vnd.ms-cab-compressed' }
+            @{ Reply = '407|application/vnd.ms-cab-compressed' }
+            @{ Reply = '302|application/vnd.ms-cab-compressed' }
+            @{ Reply = '200|text/html' }
+            @{ Reply = '200|Text/HTML; charset=utf-8' }
+        ) {
+            $r = Invoke-RwuStep13 -HttpReply $Reply
+            $r.ProbeExits[0] | Should -Be 0
+            $r.ProbeExits[1] | Should -Not -Be 0
+            $r.Http.Requests | Should -Be 1
+            $r.Findings | Should -Be 1
+            $r.Vars.DIAG_FINDINGS | Should -Be '1'
+            $r.Log | Should -Match "Status: $($Reply.Split('|')[0])"
+        }
+        It '200 application/vnd.ms-cab-compressed passes' {
+            $r = Invoke-RwuStep13
+            $r.ProbeExits[1] | Should -Be 0
+            $r.Http.Requests | Should -Be 1
+            $r.Log | Should -Match ([regex]::Escape('application/vnd.ms-cab-compressed'))
+        }
+    }
+
+    Context 'Retry (AC-21)' {
+        It '<_> first: retried, pass with 2 requests' -ForEach 'drop', 'garbage' {
+            $r = Invoke-RwuStep13 -HttpReply $_, '200|application/vnd.ms-cab-compressed'
+            $r.ProbeExits[1] | Should -Be 0
+            $r.Http.Requests | Should -Be 2
+            $r.Findings | Should -Be 0
+        }
+        It 'An HTTP error is not retried' {
+            (Invoke-RwuStep13 -HttpReply '403|text/plain', '200|application/vnd.ms-cab-compressed').Http.Requests | Should -Be 1
+        }
+        # .NET Framework sends a dropped GET a second time inside one GetResponse call, and no
+        # public setting stops it. 'garbage' is the no-HTTP-response case that it does not resend.
+        It 'Always <Reply>: exactly 3 attempts, then fail' -TestCases @(
+            @{ Reply = 'garbage'; Requests = 3 }
+            @{ Reply = 'drop'; Requests = 6 }
+        ) {
+            $r = Invoke-RwuStep13 -HttpReply $Reply
+            $r.Http.Requests | Should -Be $Requests
+            $r.ProbeExits[1] | Should -Not -Be 0
+            $r.Findings | Should -Be 1
+            [regex]::Matches($r.Log, 'Attempt \d of 3').Count | Should -Be 3
+        }
+    }
+
+    Context 'Findings (AC-22)' {
+        It 'Both probes failing add exactly one finding' {
+            $r = Invoke-RwuStep13 -HttpsReply '403|text/html' -HttpReply '403|text/html'
+            $r.Findings | Should -Be 1
+            $r.Vars.DIAG_FINDINGS | Should -Be '1'
+        }
+        It 'The old URLs are gone' {
+            $t = Get-RwuScriptText
+            $t | Should -Not -Match 'https://update\.microsoft\.com'
+            $t | Should -Not -Match 'https://download\.windowsupdate\.com'
+        }
+    }
+}
+
+
+# ── Phase 21: Batch cleanups ────────────────────────────────────────────────
+
+Describe 'Phase 21 — Batch Cleanups' {
+    It '/autokeys <Name> exits 1 with an error' -TestCases @(
+        @{ Name = 'as the last argument'; Arg = '/testmode /autokeys' }
+        @{ Name = 'followed by another switch'; Arg = '/testmode /autokeys /debug' }
+        @{ Name = 'with an empty value'; Arg = '/testmode /autokeys ""' }
+    ) {
+        $shipped = (Resolve-Path (Join-Path $PSScriptRoot '..\Reset_WindowsUpdate.cmd')).Path
+        $r = Invoke-RwuProcess -CommandLine "`"$shipped`" $Arg" -Cwd $TestDrive -TimeoutSec 20
+        $r.ExitCode | Should -Be 1
+        $r.Output | Should -Match 'ERROR: /autokeys requires a value'
+    }
+    It '/autokeys with a value sets _AUTOKEYS and continues' {
+        $r = Invoke-RwuBlock -Entry 'set "_AUTOKEYS="', 'call :ParseArgs /autokeys 7.2 /diag /logdir .'
+        $r.Vars._AUTOKEYS | Should -Be '7.2'
+        $r.Vars.LOGFILE | Should -Be "$($r.Work)\WU_Reset_Log.txt"
+    }
+    It '_AUTOKEYS is not pre-initialized' {
+        Get-RwuScriptText | Should -Not -Match '(?im)^\s*set\s+"_AUTOKEYS="'
+    }
+    It 'No executable line has a hardcoded C:\Windows path' {
+        $bad = (Get-RwuScriptText) -split '\r?\n' | Where-Object { $_ -notmatch '^\s*(::|rem\b)' -and $_ -match '(?i)C:\\Windows\b' }
+        $bad | Should -BeNullOrEmpty
+        # the three log reads
+        [regex]::Matches((Get-RwuScriptText), '(?i)\$env:SystemRoot\\Logs|\$env:SystemRoot\+''\\Logs|Join-Path \$env:SystemRoot').Count | Should -Be 3
+    }
+    It 'The DISM tip names an install.wim source' {
+        $t = Get-RwuScriptText
+        $t | Should -Match ([regex]::Escape('/Source:WIM:D:\sources\install.wim:1 /LimitAccess'))
+        $t | Should -Not -Match '/Source:D:\\sources'
+    }
+}
+
+
+# ── Phase 22: Launcher, bump script and release hash ────────────────────────
+
+Describe 'Phase 22 — Launcher' {
+    BeforeAll {
+        # The shipped launcher in a child Windows PowerShell; the network and launch commands only record.
+        function Invoke-Launcher([switch]$NoAsset, [string]$Body, [switch]$NoRelease) {
+            $d = Join-Path $TestDrive "l_$(Get-Random)"
+            [void](New-Item -ItemType Directory "$d\tmp" -Force)
+            $name = if ($NoAsset) { 'other.txt' } else { 'Reset_WindowsUpdate.cmd' }
+            $drv = @"
+[Net.ServicePointManager]::SecurityProtocol = 768
+function Invoke-RestMethod { Add-Content '$d\calls.txt' "rest `$(`$args[0]) tls=`$([int][Net.ServicePointManager]::SecurityProtocol)"
+  if ($([int][bool]$NoRelease)) { throw 'no release' }
+  [pscustomobject]@{ tag_name = 'v9.9.9'; body = '$Body'; assets = @([pscustomobject]@{ name = '$name'; browser_download_url = 'https://asset.example/x' }) } }
+function Invoke-WebRequest { param(`$Uri, `$OutFile, [switch]`$UseBasicParsing, `$ErrorAction)
+  Add-Content '$d\calls.txt' "web `$Uri"; [IO.File]::WriteAllText(`$OutFile, 'payload') }
+function Start-Process { Add-Content '$d\calls.txt' "start `$args" }
+. '$((Resolve-Path (Join-Path $PSScriptRoot '..\rwu.ps1')).Path)'
+"@
+            Set-Content "$d\drv.ps1" $drv -Encoding ascii
+            $r = Invoke-RwuProcess -CommandLine "`"$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -File `"$d\drv.ps1`"" -Cwd $d -Env @{
+                TEMP = "$d\tmp"; TMP = "$d\tmp"; RWU_DEBUG = ''
+                PSModulePath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules" # not the one of PowerShell 7
+            }
+            [pscustomobject]@{
+                Output = $r.Output
+                Calls  = @(if (Test-Path "$d\calls.txt") { Get-Content "$d\calls.txt" })
+                Left   = @(Get-ChildItem "$d\tmp" -Filter 'rwu_*')
+            }
+        }
+        $sha = [Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::ASCII.GetBytes('payload'))
+        $script:good = ($sha | ForEach-Object { $_.ToString('X2') }) -join ''
+        $script:bad = 'A' * 64
+    }
+    It 'Right hash: 1 download of the asset, 1 launch' {
+        $r = Invoke-Launcher -Body "SHA256: $good"
+        @($r.Calls -like 'web *') | Should -Be @('web https://asset.example/x')
+        @($r.Calls -like 'start *').Count | Should -Be 1
+        $r.Output | Should -Match 'VERIFIED'
+        $r.Left.Count | Should -Be 0
+    }
+    It 'Tls12 is added before the first request, and other protocols stay' {
+        (Invoke-Launcher -Body "SHA256: $good").Calls[0] | Should -Match 'tls=3840$'
+    }
+    It 'No asset: error, 0 downloads, 0 launches' {
+        $r = Invoke-Launcher -NoAsset -Body "SHA256: $good"
+        @($r.Calls -match '^(web|start) ').Count | Should -Be 0
+        $r.Output | Should -Match 'ERROR: .*Reset_WindowsUpdate\.cmd'
+        $r.Left.Count | Should -Be 0
+    }
+    It '<Name>: 0 launches' -TestCases @(
+        @{ Name = 'Wrong hash'; Body = "SHA256: $('A' * 64)"; Text = 'Hash mismatch' }
+        @{ Name = 'No hash'; Body = 'nothing here'; Text = 'No SHA256 hash' }
+    ) {
+        $r = Invoke-Launcher -Body $Body
+        @($r.Calls -like 'start *').Count | Should -Be 0
+        $r.Output | Should -Match $Text
+        $r.Left.Count | Should -Be 0
+    }
+    It 'No release: 0 downloads, 0 launches' {
+        $r = Invoke-Launcher -NoRelease
+        @($r.Calls -match '^(web|start) ').Count | Should -Be 0
+        $r.Output | Should -Match 'No releases found'
+    }
+    It 'There is no raw-URL fallback' {
+        Get-Content (Join-Path $PSScriptRoot '..\rwu.ps1') | Where-Object { $_ -notmatch '^\s*#' -and $_ -match 'raw\.githubusercontent' } | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Phase 22 — Bump Script' {
+    BeforeAll {
+        $script:keyDir = Join-Path $TestDrive 'key'
+        [void](New-Item -ItemType Directory $keyDir)
+        ssh-keygen -q -t ed25519 -C 'rwu-test' -N '' -f "$keyDir\k" | Out-Null
+        if (-not (Test-Path "$keyDir\k.pub")) { throw 'no test key' }
+        $script:saved = @{}
+        foreach ($n in 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE') {
+            $saved[$n] = [Environment]::GetEnvironmentVariable($n)
+        }
+        # Set by git when this suite runs from a commit hook.
+        Remove-Item Env:GIT_DIR, Env:GIT_WORK_TREE, Env:GIT_INDEX_FILE -ErrorAction SilentlyContinue
+        $env:GIT_CONFIG_NOSYSTEM = '1'
+
+        # A temporary repository with a bare remote. Skip/Set change the signing settings.
+        function New-BumpRepo([string]$Skip, [hashtable]$Set = @{}) {
+            $d = Join-Path $TestDrive "b_$(Get-Random)"
+            [void](New-Item -ItemType Directory "$d\repo" -Force)
+            $env:GIT_CONFIG_GLOBAL = "$d\gitconfig"
+            Set-Content $env:GIT_CONFIG_GLOBAL '' -NoNewline
+            $cfg = @{
+                'user.name' = 'MatBanik'; 'user.email' = '219344396+matbanik@users.noreply.github.com'; 'core.autocrlf' = 'false'
+                'commit.gpgsign' = 'true'; 'tag.gpgsign' = 'true'; 'gpg.format' = 'ssh'; 'user.signingkey' = "$keyDir\k.pub".Replace('\', '/')
+            }
+            foreach ($k in $cfg.Keys) { git config --global $k $cfg[$k] }
+            git init -q -b main "$d\repo"
+            git init -q --bare -b main "$d\remote.git"
+            git -C "$d\repo" remote add origin "$d\remote.git"
+            [IO.File]::WriteAllText("$d\repo\Reset_WindowsUpdate.cmd", "@echo off`r`nset `"ver=1.1.1`"`r`necho x`r`n")
+            git -C "$d\repo" add -A
+            git -C "$d\repo" commit -q -m 'init'
+            if ($Skip) { git config --global --unset $Skip }
+            foreach ($k in $Set.Keys) { git config --global $k $Set[$k] }
+            $d
+        }
+        function Invoke-Bump([string]$D, [string]$Arguments) {
+            $bump = (Resolve-Path (Join-Path $PSScriptRoot '..\bump.ps1')).Path
+            Invoke-RwuProcess -CommandLine "`"$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -File `"$bump`" $Arguments" -Cwd "$D\repo"
+        }
+        function Get-CommitCount([string]$D) { [int](git -C "$D\repo" rev-list --count HEAD) }
+    }
+    AfterAll {
+        foreach ($n in $saved.Keys) {
+            if ($null -eq $saved[$n]) { Remove-Item "Env:$n" -ErrorAction SilentlyContinue } else { Set-Item "Env:$n" $saved[$n] }
+        }
+    }
+
+    It '<Name>: exit 1, file unchanged, no commit' -TestCases @(
+        @{ Name = 'commit.gpgsign missing'; Skip = 'commit.gpgsign'; Set = @{} }
+        @{ Name = 'tag.gpgsign missing'; Skip = 'tag.gpgsign'; Set = @{} }
+        @{ Name = 'gpg.format missing'; Skip = 'gpg.format'; Set = @{} }
+        @{ Name = 'user.signingkey missing'; Skip = 'user.signingkey'; Set = @{} }
+        @{ Name = 'commit.gpgsign false'; Skip = ''; Set = @{ 'commit.gpgsign' = 'false' } }
+        @{ Name = 'gpg.format openpgp'; Skip = ''; Set = @{ 'gpg.format' = 'openpgp' } }
+    ) {
+        $d = New-BumpRepo -Skip $Skip -Set $Set
+        $before = [IO.File]::ReadAllText("$d\repo\Reset_WindowsUpdate.cmd")
+        $r = Invoke-Bump $d '9.9.9'
+        $r.ExitCode | Should -Be 1
+        $r.Output | Should -Match ([regex]::Escape($Name.Split(' ')[0]))
+        [IO.File]::ReadAllText("$d\repo\Reset_WindowsUpdate.cmd") | Should -Be $before
+        Get-CommitCount $d | Should -Be 1
+        git -C "$d\repo" tag -l | Should -BeNullOrEmpty
+    }
+    It 'A failing pre-commit hook: nonzero, no commit, no tag, nothing pushed' {
+        $d = New-BumpRepo
+        [IO.File]::WriteAllText("$d\repo\.git\hooks\pre-commit", "#!/bin/sh`nexit 1`n")
+        (Invoke-Bump $d '9.9.9').ExitCode | Should -Not -Be 0
+        Get-CommitCount $d | Should -Be 1
+        git -C "$d\repo" tag -l | Should -BeNullOrEmpty
+        git --git-dir "$d\remote.git" for-each-ref | Should -BeNullOrEmpty
+    }
+    It 'A failing git tag: nonzero, nothing pushed' {
+        $d = New-BumpRepo
+        git -C "$d\repo" -c tag.gpgsign=false tag v9.9.9
+        (Invoke-Bump $d '9.9.9').ExitCode | Should -Not -Be 0
+        git --git-dir "$d\remote.git" for-each-ref | Should -BeNullOrEmpty
+    }
+    It 'A failing push: nonzero, and no success message' {
+        $d = New-BumpRepo
+        Remove-Item "$d\remote.git" -Recurse -Force
+        $r = Invoke-Bump $d '9.9.9'
+        $r.ExitCode | Should -Not -Be 0
+        $r.Output | Should -Not -Match 'Pushed v9\.9\.9'
+    }
+    It '-NoPush: one signed commit, no tag, only the ver line differs; a second run adds nothing' {
+        $d = New-BumpRepo
+        (Invoke-Bump $d '9.9.9 -NoPush').ExitCode | Should -Be 0
+        Get-CommitCount $d | Should -Be 2
+        (git -C "$d\repo" cat-file commit HEAD) -join "`n" | Should -Match 'BEGIN SSH SIGNATURE'
+        git -C "$d\repo" log -1 --format='%an <%ae>' | Should -Be 'MatBanik <219344396+matbanik@users.noreply.github.com>'
+        git -C "$d\repo" tag -l | Should -BeNullOrEmpty
+        git --git-dir "$d\remote.git" for-each-ref | Should -BeNullOrEmpty
+        $diff = @(git -C "$d\repo" diff -U0 HEAD~1 HEAD | Where-Object { $_ -match '^[+-](?![+-])' } | ForEach-Object { $_.TrimEnd("`r") })
+        $diff | Should -Be @('-set "ver=1.1.1"', '+set "ver=9.9.9"')
+        (Invoke-Bump $d '9.9.9 -NoPush').ExitCode | Should -Be 0
+        Get-CommitCount $d | Should -Be 2
+    }
+    It 'A full run pushes main and a signed annotated tag' {
+        $d = New-BumpRepo
+        $r = Invoke-Bump $d '9.9.9'
+        $r.ExitCode | Should -Be 0
+        @(git --git-dir "$d\remote.git" for-each-ref --format='%(refname)') | Should -Be @('refs/heads/main', 'refs/tags/v9.9.9')
+        (git -C "$d\repo" cat-file tag v9.9.9) -join "`n" | Should -Match 'BEGIN SSH SIGNATURE'
+    }
+}
+
+Describe 'Phase 22 — Release Hash Check' {
+    BeforeAll {
+        $script:h = '0123456789abcdef' * 4
+        $script:body = "## Integrity`n| File | SHA256 |`n| x | ``$('B' * 64)`` |`n`nSHA256: $($h.ToUpper())`n"
+        function Invoke-HashCheck([string]$Body, [string]$Expected = $h, [string]$Launcher) {
+            $d = Join-Path $TestDrive "h_$(Get-Random)"
+            [void](New-Item -ItemType Directory $d)
+            [IO.File]::WriteAllText("$d\body.md", $Body)
+            $l = (Resolve-Path (Join-Path $PSScriptRoot '..\rwu.ps1')).Path
+            if ($Launcher) { $l = "$d\l.ps1"; [IO.File]::WriteAllText($l, $Launcher) }
+            $f = Join-Path $PSScriptRoot '..\.github\scripts\Test-ReleaseHash.ps1'
+            pwsh -NoProfile -File $f -BodyPath "$d\body.md" -LauncherPath $l -ExpectedHash $Expected | Out-Null
+            $LASTEXITCODE
+        }
+    }
+    It 'The right hash exits 0' { Invoke-HashCheck $body | Should -Be 0 }
+    It '<Name> exits 1' -TestCases @(
+        @{ Name = 'An unreplaced placeholder'; Pat = 'SHA256: [0-9A-F]{64}'; With = 'SHA256: $HASH_PLACEHOLDER' }
+        @{ Name = 'A wrong hash'; Pat = 'SHA256: [0-9A-F]{64}'; With = "SHA256: $('C' * 64)" }
+        @{ Name = 'An earlier decoy hash'; Pat = '^'; With = "SHA256: $('C' * 64)`n" }
+    ) {
+        Invoke-HashCheck ([regex]$Pat).Replace($body, $With.Replace('$', '$$'), 1) | Should -Be 1
+    }
+    It 'A launcher with <Name> exits 1' -TestCases @(
+        @{ Name = 'no regex'; Text = 'Write-Host hi' }
+        @{ Name = 'two regexes'; Text = "`$a -match 'SHA256:\s*([0-9A-Fa-f]{64})'; `$b -match 'SHA256:\s*([0-9A-Fa-f]{64})'" }
+    ) {
+        Invoke-HashCheck $body -Launcher $Text | Should -Be 1
+    }
+    It 'An expected value that is not a SHA256 exits 1' { Invoke-HashCheck $body -Expected 'abc' | Should -Be 1 }
+}
+
+
+# ── Phase 23: Documentation ─────────────────────────────────────────────────
+
+Describe 'Phase 23 — Documentation' {
+    BeforeAll {
+        function Get-RwuDoc([string]$Name) { [IO.File]::ReadAllText((Join-Path $PSScriptRoot "..\$Name"), [Text.Encoding]::UTF8) }
+    }
+    It 'README lists <_>' -TestCases @('/fix', '/debug', '/logdir') {
+        Get-RwuDoc 'README.md' | Should -Match "(?m)^Reset_WindowsUpdate\.cmd .*$([regex]::Escape($_)) "
+    }
+    It 'FAQ: 0x80070422 is detected and reported, not re-enabled' {
+        $row = @((Get-RwuDoc 'FAQ.md') -split '\r?\n' | Where-Object { $_ -match '^\| `0x80070422`' })
+        $row.Count | Should -Be 1
+        $row[0] | Should -Match 'detects and reports a disabled service'
+        $row[0] | Should -Match 'does not re-enable'
+        $row[0] | Should -Not -Match '✅'
+    }
+    It 'FAQ: Step 13 names the two hosts that :ProbeWU contacts' {
+        $faq = Get-RwuDoc 'FAQ.md'
+        $hosts = @([regex]::Matches((Get-RwuScriptText), 'set "_PROBE_URI=https?://([^/"]+)') | ForEach-Object { $_.Groups[1].Value })
+        $hosts.Count | Should -Be 2
+        $line = @($faq -split '\r?\n' | Where-Object { $_ -match 'Step 13' })
+        $line.Count | Should -Be 1
+        foreach ($h in $hosts) { $line[0] | Should -Match ([regex]::Escape("``$h``")) }
+        $faq | Should -Not -Match '`update\.microsoft\.com`'
+    }
+    It 'FAQ: Windows 10 support is past tense for October 2026' {
+        $faq = Get-RwuDoc 'FAQ.md'
+        $faq | Should -Match 'We supported Windows 10 until October 2026'
+        $faq | Should -Match 'Consumer ESU ended on October 13, 2026'
+        $faq | Should -Not -Match 'We support Windows 10|will display a deprecation notice'
+    }
+    It 'CONTRIBUTING describes the Pester suite' {
+        $doc = Get-RwuDoc 'CONTRIBUTING.md'
+        $doc | Should -Match 'tests/rwu\.Tests\.ps1'
+        $doc | Should -Match 'Pester 5'
+        $doc | Should -Match 'tests/support/Invoke-RwuPester\.ps1'
+        $doc | Should -Not -Match "can't be unit-tested"
+    }
+}
+
+
+# ── Phase 24: Live probe (network; excluded unless the filter names it) ──────
+
+Describe 'Phase 24 — Live Probe' -Tag 'Live' {
+    BeforeAll {
+        $script:psDir = Split-Path $RwuWinPS
+    }
+    It 'The shipped :ProbeWU passes against <Uri>' -TestCases @(
+        @{ Kind = 'https'; Uri = 'https://fe2cr.update.microsoft.com/v6/ClientWebService/client.asmx'; Detail = 'certificate issuer: .*O=Microsoft Corporation' }
+        @{ Kind = 'http'; Uri = 'http://ctldl.windowsupdate.com/msdownload/update/v3/static/trustedr/en/disallowedcertstl.cab'; Detail = 'content type: ' }
+    ) {
+        $entry = "set `"_PROBE_URI=$Uri`"", "set `"_PROBE_KIND=$Kind`"", 'call :ProbeWU', 'set "_rc=!errorlevel!"', 'goto :StepDone'
+        $r = Invoke-RwuBlock -Entry $entry -ExtraPath $psDir -TimeoutSec 120
+        $r.Log | Should -Match "Status: 200 - OK - $Detail"
+        $r.Vars._rc | Should -Be '0'
+    }
+    It 'The shipped Step 13 finds nothing' {
+        $r = Invoke-RwuBlock -Steps Step13 -ExtraPath $psDir -Vars @{ _STOP_AFTER = 'Step13' } -TimeoutSec 180
+        [regex]::Matches($r.Log, 'Status: 200 - OK').Count | Should -Be 2
+        $r.Vars.DIAG_FINDINGS | Should -Be '0'
+        $r.Log | Should -Not -Match 'FINDING:'
     }
 }

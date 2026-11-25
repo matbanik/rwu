@@ -1,4 +1,10 @@
 @echo off
+:: The log paths are captured before delayed expansion, which would remove a ! from them.
+setlocal DisableDelayedExpansion
+set "DESKTOP=%USERPROFILE%\Desktop"
+if not exist "%DESKTOP%" set "DESKTOP=%USERPROFILE%"
+set "LOGFILE=%DESKTOP%\WU_Reset_Log.txt"
+set "DEBUGLOG=%DESKTOP%\RWU_Debug.log"
 setlocal EnableDelayedExpansion
 :: ============================================================
 :: Windows Update Reset & Repair Tool - Windows 11
@@ -45,7 +51,7 @@ if /I "%~1"=="/?"      goto :ShowHelp
 if /I "%~1"=="-help"   goto :ShowHelp
 if /I "%~1"=="--help"  goto :ShowHelp
 
-:: Early /testmode detection — scan all args before admin check
+:: Early /testmode detection - scan all args before admin check
 :: so testmode can skip elevation requirement
 for %%A in (%*) do (
     if /I "%%~A"=="/testmode" set "_TESTMODE=1"
@@ -69,12 +75,6 @@ if not "!_TESTMODE!"=="1" (
     )
 )
 
-:: Set log file path with fallback
-set "DESKTOP=%USERPROFILE%\Desktop"
-if not exist "%DESKTOP%" set "DESKTOP=%USERPROFILE%"
-set "LOGFILE=%DESKTOP%\WU_Reset_Log.txt"
-set "DEBUGLOG=%DESKTOP%\RWU_Debug.log"
-
 :: Generate timestamp for backups (PowerShell - wmic is deprecated on Win11)
 for /f "usebackq" %%I in (`powershell -NoProfile -Command "Get-Date -Format 'yyyyMMdd-HHmmss'"`) do set "TIMESTAMP=%%I"
 :: Fallback if PowerShell failed
@@ -88,6 +88,10 @@ set /a WARN_COUNT=0
 set /a FAIL_COUNT=0
 :: Diagnostic findings counter (system health issues found during scan)
 set /a DIAG_FINDINGS=0
+:: Services this run stopped (space-delimited; Step 11 starts them again)
+set "_STOPPED_BY_RUN= "
+:: 1 = Step 5 deferred the BITS queue reset to Step 11
+set "_BITS_RESET_PENDING=0"
 
 :: ANSI escape character for spinner and screen control
 for /f "delims=" %%a in ('powershell -NoProfile -Command "[char]27"') do set "ESC=%%a"
@@ -103,7 +107,7 @@ if "%_CLI_MODE%"=="1" goto :ParseArgs
 title  Windows Update Reset Tool %ver%
 if not "!_TESTMODE!"=="1" (
     mode con: cols=80 lines=35 >nul 2>&1 || (
-        echo  [WARN] Could not set console size. Layout may vary. >> "%LOGFILE%" 2>nul
+        echo  [WARN] Could not set console size. Layout may vary. >> "!LOGFILE!" 2>nul
     )
 )
 :: Initialize debug log if enabled
@@ -142,7 +146,7 @@ if /I "%~1"=="/policy"  ( set "RESET_WU_POLICIES=1" & shift & goto :ParseArgsLoo
 if /I "%~1"=="/sddl"    ( set "RESET_SERVICE_SDDL=1" & shift & goto :ParseArgsLoop )
 if /I "%~1"=="/debug"   ( set "DEBUG=1" & shift & goto :ParseArgsLoop )
 if /I "%~1"=="/testmode" ( set "_TESTMODE=1" & shift & goto :ParseArgsLoop )
-if /I "%~1"=="/autokeys" ( set "_AUTOKEYS=%~2" & shift & shift & goto :ParseArgsLoop )
+if /I "%~1"=="/autokeys" goto :ParseAutokeys
 if /I "%~1"=="/step" (
     if defined _CLI_ACTION (
         echo ERROR: Conflicting actions: /!_CLI_ACTION! and /step
@@ -172,32 +176,52 @@ if /I "%~1"=="/fix" (
     set "_CLI_FIX=%~2"
     shift & shift & goto :ParseArgsLoop
 )
-if /I "%~1"=="/logdir" (
-    if "%~2"=="" (
-        echo ERROR: /logdir requires a path. Example: /logdir "C:\Temp"
-        endlocal & exit /b 1
-    )
-    set "_CLI_LOGDIR=%~2"
-    shift & shift & goto :ParseArgsLoop
-)
+if /I "%~1"=="/logdir" goto :ParseLogDir
 echo ERROR: Unknown argument: %~1
 echo Run with /help for usage.
 endlocal & exit /b 1
 
-:RunCLI
-:: Apply custom log directory if specified
-if defined _CLI_LOGDIR (
-    if not exist "!_CLI_LOGDIR!" (
-        echo ERROR: Log directory does not exist: !_CLI_LOGDIR!
-        endlocal & exit /b 1
-    )
-    set _CLI_LOGDIR 2>nul | findstr /C:"!" >nul 2>&1 && (
-        echo ERROR: Log path cannot contain '!' characters.
-        endlocal & exit /b 1
-    )
-    set "LOGFILE=!_CLI_LOGDIR!\WU_Reset_Log.txt"
-    set "DEBUGLOG=!_CLI_LOGDIR!\RWU_Debug.log"
+:ParseAutokeys
+:: Outside an if block: 'cmd /c' loses the code of an exit /b in a nested block.
+if "%~2"=="" goto :AutokeysError
+set "_AUTOKEYS=%~2"
+if "!_AUTOKEYS:~0,1!"=="/" goto :AutokeysError
+shift & shift & goto :ParseArgsLoop
+:AutokeysError
+echo ERROR: /autokeys requires a value. Example: /autokeys 7.2.10
+endlocal & exit /b 1
+
+:ParseLogDir
+setlocal DisableDelayedExpansion
+if "%~2"=="" (
+    echo ERROR: /logdir requires a path. Example: /logdir "C:\Temp"
+    exit /b 1
 )
+set "_newpath=%~2"
+set "_newpath=%_newpath:"=%"
+call :CanonLogDir
+if errorlevel 2 (
+    echo ERROR: Log path cannot contain '!' characters.
+    exit /b 1
+)
+if errorlevel 1 (
+    echo ERROR: Log directory does not exist: "%~2"
+    exit /b 1
+)
+endlocal & set "LOGFILE=%_newpath%\WU_Reset_Log.txt" & set "DEBUGLOG=%_newpath%\RWU_Debug.log"
+shift & shift & goto :ParseArgsLoop
+
+:CanonLogDir
+:: Make the folder in _newpath absolute, without a trailing backslash, so that a drive
+:: root gives C:\WU_Reset_Log.txt. Returns 0, 1 = not a folder, 2 = contains an
+:: exclamation mark. The caller has delayed expansion disabled.
+for %%I in ("%_newpath%\.") do set "_newpath=%%~fI"
+if not "%_newpath:!=%"=="%_newpath%" exit /b 2
+if "%_newpath:~-1%"=="\" set "_newpath=%_newpath:~0,-1%"
+if not exist "%_newpath%\" exit /b 1
+exit /b 0
+
+:RunCLI
 :: Initialize debug log if enabled (CLI mode)
 if "!DEBUG!"=="1" call :DebugInit
 call :Trace "INIT: CLI mode, action=!_CLI_ACTION!"
@@ -274,7 +298,7 @@ echo:          [3]  Advanced  ^>
 echo:               Pick individual steps to run.
 echo:
 echo:          [S]  System Fixes  ^>
-echo:               DISM, SFC, CHKDSK — repair underlying system issues.
+echo:               DISM, SFC, CHKDSK - repair underlying system issues.
 echo:          ________________________________________________________
 echo:
 :: Build colored toggle labels (OFF=gray, ON=yellow)
@@ -294,9 +318,8 @@ echo:
 echo:          [0]  Exit
 echo:
 echo:  ================================================================
-for %%F in ("%LOGFILE%") do set "_LOGNAME=%%~nxF"&set "_LOGDIR=%%~dpF"
-if defined _LOGDIR set "_LOGDIR=!_LOGDIR:~0,-1!"
-echo:     Log: ...\!_LOGNAME!
+set "_LOGDIR=!LOGFILE:\WU_Reset_Log.txt=!"
+echo:     Log: ...\WU_Reset_Log.txt
 echo:     Dir: !_LOGDIR!
 echo:  ================================================================
 echo.
@@ -633,10 +656,10 @@ echo:     Change Log Output Folder
 echo:  ================================================================
 echo:
 echo:     Current log file:
-echo:       %LOGFILE%
+echo:       !LOGFILE!
 echo:
 echo:     Enter a new folder path, or type 0 to go back.
-echo:     The folder must already exist. Cannot contain '!'.
+echo:     The folder must already exist. Cannot contain '^^!'.
 echo:     Quotes are OK if pasted.
 echo:
 echo:     Examples:
@@ -655,30 +678,27 @@ if not defined _newpath endlocal & goto :MainMenu
 if "%_newpath%"=="0" endlocal & goto :MainMenu
 :: Strip surrounding quotes if pasted from Explorer
 set "_newpath=%_newpath:"=%"
-:: Trim trailing backslash
-if "%_newpath:~-1%"=="\" set "_newpath=%_newpath:~0,-1%"
-:: Validate path exists
-if not exist "%_newpath%\" (
-    echo.
-    echo   ERROR: Folder "%_newpath%" does not exist.
-    echo   Press any key to try again...
-    pause >nul
-    endlocal & goto :ChangeLogFolder
-)
-:: Reject paths containing ! (delayed expansion would mangle them).
-:: Use 'set _newpath' which safely outputs name=value without parsing
-:: metacharacters like & | < > in the path string.
-set _newpath 2>nul | findstr /C:"!" >nul 2>&1 && (
+if not defined _newpath endlocal & goto :ChangeLogFolder
+:: Reject missing folders and paths containing ! (delayed expansion would mangle them)
+call :CanonLogDir
+if errorlevel 2 (
     echo.
     echo   ERROR: Path cannot contain '!' characters.
     echo   Press any key to try again...
     pause >nul
     endlocal & goto :ChangeLogFolder
 )
+if errorlevel 1 (
+    echo.
+    echo   ERROR: Folder "%_newpath%" does not exist.
+    echo   Press any key to try again...
+    pause >nul
+    endlocal & goto :ChangeLogFolder
+)
 :: Promote path out of DisableDelayedExpansion scope
-endlocal & set "LOGFILE=%_newpath%\WU_Reset_Log.txt"
+endlocal & set "LOGFILE=%_newpath%\WU_Reset_Log.txt" & set "DEBUGLOG=%_newpath%\RWU_Debug.log"
 echo.
-echo   Log file set to: %LOGFILE%
+echo   Log file set to: !LOGFILE!
 echo   Press any key to return to menu...
 pause >nul
 goto :MainMenu
@@ -702,6 +722,7 @@ goto :Step0
 :FullReset
 call :Trace "entering :FullReset"
 set "_FULLRESET=1"
+set "_BITS_RESET_PENDING=0"
 set "_STOP_AFTER=Step14"
 set "_RUN_LABEL=Full WU Reset (standard flow; optional steps by toggle)"
 if "!_TESTMODE!"=="1" (
@@ -716,20 +737,20 @@ goto :Step0
 :InitLog
 for /f "usebackq" %%I in (`powershell -NoProfile -Command "Get-Date -Format 'yyyyMMdd-HHmmss'"`) do set "TIMESTAMP=%%I"
 if defined TIMESTAMP set "TIMESTAMP=!TIMESTAMP: =0!"
-echo. >> "%LOGFILE%"
-echo ============================================================ >> "%LOGFILE%"
-echo  Windows Update Reset Log >> "%LOGFILE%"
-echo  Action: !_RUN_LABEL! >> "%LOGFILE%"
-echo  Computer: %COMPUTERNAME% >> "%LOGFILE%"
-echo  User: %USERNAME% >> "%LOGFILE%"
-echo  Date: %DATE% %TIME% >> "%LOGFILE%"
-echo  Backup Timestamp: !TIMESTAMP! >> "%LOGFILE%"
-echo ============================================================ >> "%LOGFILE%"
-echo. >> "%LOGFILE%"
-echo  NOTICE: This log may contain system identifiers, network >> "%LOGFILE%"
-echo  configuration, and license details. Treat as sensitive if >> "%LOGFILE%"
-echo  sharing outside the immediate troubleshooting context. >> "%LOGFILE%"
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
+echo ============================================================ >> "!LOGFILE!"
+echo  Windows Update Reset Log >> "!LOGFILE!"
+echo  Action: !_RUN_LABEL! >> "!LOGFILE!"
+echo  Computer: %COMPUTERNAME% >> "!LOGFILE!"
+echo  User: %USERNAME% >> "!LOGFILE!"
+echo  Date: %DATE% %TIME% >> "!LOGFILE!"
+echo  Backup Timestamp: !TIMESTAMP! >> "!LOGFILE!"
+echo ============================================================ >> "!LOGFILE!"
+echo. >> "!LOGFILE!"
+echo  NOTICE: This log may contain system identifiers, network >> "!LOGFILE!"
+echo  configuration, and license details. Treat as sensitive if >> "!LOGFILE!"
+echo  sharing outside the immediate troubleshooting context. >> "!LOGFILE!"
+echo. >> "!LOGFILE!"
 exit /b
 
 :: --- Run individual steps from Advanced menu ---
@@ -841,197 +862,197 @@ goto :FixProxy
 :: -----------------------------------------------
 :Step0
 echo [STEP 0] Capturing system diagnostics...
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [STEP 0] System Diagnostics >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo. >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [STEP 0] System Diagnostics >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0a: OS Identity ---
-echo --- 0a: OS Version and Build --- >> "%LOGFILE%"
-ver >> "%LOGFILE%" 2>&1
-powershell -NoProfile -Command "Get-ComputerInfo | Select-Object OsName, OsVersion, OsBuildNumber, WindowsVersion, OsArchitecture, OsProductType, OsRegisteredUser, OsInstallDate, OsLastBootUpTime | Format-List" >> "%LOGFILE%" 2>&1
-echo. >> "%LOGFILE%"
+echo --- 0a: OS Version and Build --- >> "!LOGFILE!"
+ver >> "!LOGFILE!" 2>&1
+powershell -NoProfile -Command "Get-ComputerInfo | Select-Object OsName, OsVersion, OsBuildNumber, WindowsVersion, OsArchitecture, OsProductType, OsRegisteredUser, OsInstallDate, OsLastBootUpTime | Format-List" >> "!LOGFILE!" 2>&1
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0b: Windows Edition and Activation ---
-echo --- 0b: Edition and Activation Status --- >> "%LOGFILE%"
-powershell -NoProfile -Command "Get-CimInstance SoftwareLicensingProduct -Filter 'ApplicationID=''55c92734-d682-4d71-983e-d6ec3f16059f'' AND PartialProductKey IS NOT NULL' | Select-Object Name, @{N='LicenseStatus';E={switch([int]$_.LicenseStatus){0{'Unlicensed'}1{'Licensed'}2{'OOB Grace'}3{'OOT Grace'}4{'Non-Genuine Grace'}5{'Notification'}6{'Extended Grace'}default{$_.LicenseStatus}}}}, Description | Format-List" >> "%LOGFILE%" 2>&1
-echo. >> "%LOGFILE%"
+echo --- 0b: Edition and Activation Status --- >> "!LOGFILE!"
+powershell -NoProfile -Command "Get-CimInstance SoftwareLicensingProduct -Filter 'ApplicationID=''55c92734-d682-4d71-983e-d6ec3f16059f'' AND PartialProductKey IS NOT NULL' | Select-Object Name, @{N='LicenseStatus';E={switch([int]$_.LicenseStatus){0{'Unlicensed'}1{'Licensed'}2{'OOB Grace'}3{'OOT Grace'}4{'Non-Genuine Grace'}5{'Notification'}6{'Extended Grace'}default{$_.LicenseStatus}}}}, Description | Format-List" >> "!LOGFILE!" 2>&1
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0c: Insider Program Status ---
-echo --- 0c: Windows Insider Status --- >> "%LOGFILE%"
+echo --- 0c: Windows Insider Status --- >> "!LOGFILE!"
 reg query "HKLM\SOFTWARE\Microsoft\WindowsSelfHost\Applicability" /v BranchName >nul 2>&1
 if !errorlevel! equ 0 (
-    echo   Insider Program: ENROLLED >> "%LOGFILE%"
-    reg query "HKLM\SOFTWARE\Microsoft\WindowsSelfHost\Applicability" /v BranchName >> "%LOGFILE%" 2>&1
-    reg query "HKLM\SOFTWARE\Microsoft\WindowsSelfHost\Applicability" /v Ring >> "%LOGFILE%" 2>&1
-    reg query "HKLM\SOFTWARE\Microsoft\WindowsSelfHost\Applicability" /v ContentType >> "%LOGFILE%" 2>&1
+    echo   Insider Program: ENROLLED >> "!LOGFILE!"
+    reg query "HKLM\SOFTWARE\Microsoft\WindowsSelfHost\Applicability" /v BranchName >> "!LOGFILE!" 2>&1
+    reg query "HKLM\SOFTWARE\Microsoft\WindowsSelfHost\Applicability" /v Ring >> "!LOGFILE!" 2>&1
+    reg query "HKLM\SOFTWARE\Microsoft\WindowsSelfHost\Applicability" /v ContentType >> "!LOGFILE!" 2>&1
     set /a DIAG_FINDINGS+=1
 ) else (
-    echo   Insider Program: Not enrolled >> "%LOGFILE%"
+    echo   Insider Program: Not enrolled >> "!LOGFILE!"
 )
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0d: Hardware - CPU and RAM ---
-echo --- 0d: CPU and Memory --- >> "%LOGFILE%"
-powershell -NoProfile -Command "Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors | Format-List" >> "%LOGFILE%" 2>&1
-powershell -NoProfile -Command "$m = Get-CimInstance Win32_PhysicalMemory; $total = ($m | Measure-Object Capacity -Sum).Sum / 1GB; Write-Output \"  Total RAM: $total GB  Sticks: $($m.Count)\"; $m | Select-Object DeviceLocator, @{N='CapacityGB';E={[math]::Round($_.Capacity/1GB)}}, Speed, Manufacturer | Format-Table -AutoSize | Out-String -Width 200" >> "%LOGFILE%" 2>&1
-echo. >> "%LOGFILE%"
+echo --- 0d: CPU and Memory --- >> "!LOGFILE!"
+powershell -NoProfile -Command "Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors | Format-List" >> "!LOGFILE!" 2>&1
+powershell -NoProfile -Command "$m = Get-CimInstance Win32_PhysicalMemory; $total = ($m | Measure-Object Capacity -Sum).Sum / 1GB; Write-Output \"  Total RAM: $total GB  Sticks: $($m.Count)\"; $m | Select-Object DeviceLocator, @{N='CapacityGB';E={[math]::Round($_.Capacity/1GB)}}, Speed, Manufacturer | Format-Table -AutoSize | Out-String -Width 200" >> "!LOGFILE!" 2>&1
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0e: Disk Health (SMART + Reliability) ---
-echo --- 0e: Disk Health --- >> "%LOGFILE%"
-powershell -NoProfile -Command "Get-PhysicalDisk | Select-Object FriendlyName, MediaType, BusType, HealthStatus, OperationalStatus, @{N='SizeGB';E={[math]::Round($_.Size/1GB,1)}} | Format-Table -AutoSize | Out-String -Width 200" >> "%LOGFILE%" 2>&1
-powershell -NoProfile -Command "Get-PhysicalDisk | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue | Select-Object DeviceId, ReadErrorsTotal, WriteErrorsTotal, Wear, Temperature, PowerOnHours | Format-Table -AutoSize | Out-String -Width 200" >> "%LOGFILE%" 2>&1
-echo. >> "%LOGFILE%"
+echo --- 0e: Disk Health --- >> "!LOGFILE!"
+powershell -NoProfile -Command "Get-PhysicalDisk | Select-Object FriendlyName, MediaType, BusType, HealthStatus, OperationalStatus, @{N='SizeGB';E={[math]::Round($_.Size/1GB,1)}} | Format-Table -AutoSize | Out-String -Width 200" >> "!LOGFILE!" 2>&1
+powershell -NoProfile -Command "Get-PhysicalDisk | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue | Select-Object DeviceId, ReadErrorsTotal, WriteErrorsTotal, Wear, Temperature, PowerOnHours | Format-Table -AutoSize | Out-String -Width 200" >> "!LOGFILE!" 2>&1
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0f: Disk Space (all drives) ---
-echo --- 0f: Disk Space --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$disks = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Select-Object DeviceID, @{N='SizeGB';E={[math]::Round($_.Size/1GB,1)}}, @{N='FreeGB';E={[math]::Round($_.FreeSpace/1GB,1)}}, @{N='FreePercent';E={[math]::Round($_.FreeSpace/$_.Size*100,1)}}; $disks | Format-Table -AutoSize | Out-String -Width 200; $crit = $disks | Where-Object { $_.FreePercent -lt 5 }; foreach ($d in $crit) { Write-Output \"  FINDING: $($d.DeviceID) critically low ($($d.FreePercent)%% free)\" }; if ($crit) { exit 1 } else { exit 0 }" >> "%LOGFILE%" 2>&1
+echo --- 0f: Disk Space --- >> "!LOGFILE!"
+powershell -NoProfile -Command "$disks = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Select-Object DeviceID, @{N='SizeGB';E={[math]::Round($_.Size/1GB,1)}}, @{N='FreeGB';E={[math]::Round($_.FreeSpace/1GB,1)}}, @{N='FreePercent';E={[math]::Round($_.FreeSpace/$_.Size*100,1)}}; $disks | Format-Table -AutoSize | Out-String -Width 200; $crit = $disks | Where-Object { $_.FreePercent -lt 5 }; foreach ($d in $crit) { Write-Output \"  FINDING: $($d.DeviceID) critically low ($($d.FreePercent)%% free)\" }; if ($crit) { exit 1 } else { exit 0 }" >> "!LOGFILE!" 2>&1
 if !errorlevel! neq 0 set /a DIAG_FINDINGS+=1
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0g: Component Store Health (quick check) ---
-echo --- 0g: Component Store Health --- >> "%LOGFILE%"
+echo --- 0g: Component Store Health --- >> "!LOGFILE!"
 :: Capture DISM output to temp file to avoid scanning the entire appended log
-set "_DISM_TMP=%TEMP%\rwu_dism_%RANDOM%.txt"
+set "_DISM_TMP=!TEMP!\rwu_dism_%RANDOM%.txt"
 DISM /Online /Cleanup-Image /CheckHealth > "!_DISM_TMP!" 2>&1
 set "_dism_erl=!errorlevel!"
-type "!_DISM_TMP!" >> "%LOGFILE%"
-echo   DISM CheckHealth exit code: !_dism_erl! >> "%LOGFILE%"
+type "!_DISM_TMP!" >> "!LOGFILE!"
+echo   DISM CheckHealth exit code: !_dism_erl! >> "!LOGFILE!"
 if !_dism_erl! neq 0 (
-    echo   FINDING: Component store needs repair >> "%LOGFILE%"
+    echo   FINDING: Component store needs repair >> "!LOGFILE!"
     set /a DIAG_FINDINGS+=1
 )
 :: Check only the DISM temp output for "repairable" (not the whole log)
 findstr /I "repairable" "!_DISM_TMP!" >nul 2>&1
 if !errorlevel! equ 0 if !_dism_erl! equ 0 (
-    echo   FINDING: Component store is repairable >> "%LOGFILE%"
+    echo   FINDING: Component store is repairable >> "!LOGFILE!"
     set /a DIAG_FINDINGS+=1
 )
 del "!_DISM_TMP!" >nul 2>&1
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0h: Pending Reboot Check ---
-echo --- 0h: Pending Reboot Flags --- >> "%LOGFILE%"
+echo --- 0h: Pending Reboot Flags --- >> "!LOGFILE!"
 set "_reboot_needed=0"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending" >nul 2>&1
-if !errorlevel! equ 0 (echo   CBS RebootPending: YES >> "%LOGFILE%"& set "_reboot_needed=1") else (echo   CBS RebootPending: No >> "%LOGFILE%")
+if !errorlevel! equ 0 (echo   CBS RebootPending: YES >> "!LOGFILE!"& set "_reboot_needed=1") else (echo   CBS RebootPending: No >> "!LOGFILE!")
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootInProgress" >nul 2>&1
-if !errorlevel! equ 0 (echo   CBS RebootInProgress: YES >> "%LOGFILE%"& set "_reboot_needed=1") else (echo   CBS RebootInProgress: No >> "%LOGFILE%")
+if !errorlevel! equ 0 (echo   CBS RebootInProgress: YES >> "!LOGFILE!"& set "_reboot_needed=1") else (echo   CBS RebootInProgress: No >> "!LOGFILE!")
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired" >nul 2>&1
-if !errorlevel! equ 0 (echo   WU RebootRequired: YES >> "%LOGFILE%"& set "_reboot_needed=1") else (echo   WU RebootRequired: No >> "%LOGFILE%")
+if !errorlevel! equ 0 (echo   WU RebootRequired: YES >> "!LOGFILE!"& set "_reboot_needed=1") else (echo   WU RebootRequired: No >> "!LOGFILE!")
 reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager" /v PendingFileRenameOperations >nul 2>&1
-if !errorlevel! equ 0 (echo   PendingFileRename: YES >> "%LOGFILE%"& set "_reboot_needed=1") else (echo   PendingFileRename: No >> "%LOGFILE%")
+if !errorlevel! equ 0 (echo   PendingFileRename: YES >> "!LOGFILE!"& set "_reboot_needed=1") else (echo   PendingFileRename: No >> "!LOGFILE!")
 if "!_reboot_needed!"=="1" (
-    echo   FINDING: Pending reboot detected >> "%LOGFILE%"
+    echo   FINDING: Pending reboot detected >> "!LOGFILE!"
     set /a DIAG_FINDINGS+=1
 )
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0i: Windows Update Configuration (registry) ---
-echo --- 0i: Windows Update Registry Config --- >> "%LOGFILE%"
-echo   --- AU Settings --- >> "%LOGFILE%"
-reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update" >> "%LOGFILE%" 2>&1
-echo. >> "%LOGFILE%"
-echo   --- WU Server (WSUS) --- >> "%LOGFILE%"
+echo --- 0i: Windows Update Registry Config --- >> "!LOGFILE!"
+echo   --- AU Settings --- >> "!LOGFILE!"
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update" >> "!LOGFILE!" 2>&1
+echo. >> "!LOGFILE!"
+echo   --- WU Server (WSUS) --- >> "!LOGFILE!"
 reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" >nul 2>&1
 if !errorlevel! equ 0 (
-    echo   WSUS/WUfB policy detected: >> "%LOGFILE%"
-    reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /v WUServer >> "%LOGFILE%" 2>&1
-    reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /v WUStatusServer >> "%LOGFILE%" 2>&1
-    reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /v DisableWindowsUpdateAccess >> "%LOGFILE%" 2>&1
+    echo   WSUS/WUfB policy detected: >> "!LOGFILE!"
+    reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /v WUServer >> "!LOGFILE!" 2>&1
+    reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /v WUStatusServer >> "!LOGFILE!" 2>&1
+    reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /v DisableWindowsUpdateAccess >> "!LOGFILE!" 2>&1
     set /a DIAG_FINDINGS+=1
 ) else (
-    echo   No WSUS/WUfB policy configured ^(OK for home/standard use^) >> "%LOGFILE%"
+    echo   No WSUS/WUfB policy configured ^(OK for home/standard use^) >> "!LOGFILE!"
 )
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0j: Recent Windows Update Failures (Event Log) ---
-echo --- 0j: Recent WU Failures (last 10, past 30 days) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WindowsUpdateClient'; Level=2,3; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Id, LevelDisplayName, Message -AutoSize -Wrap | Out-String -Width 200; Write-Output \"  FINDING: $($ev.Count) WU error events in the last 30 days\"; exit 1 } else { Write-Output '  No WU error events in the last 30 days'; exit 0 }" >> "%LOGFILE%" 2>&1
+echo --- 0j: Recent WU Failures (last 10, past 30 days) --- >> "!LOGFILE!"
+powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WindowsUpdateClient'; Level=2,3; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Id, LevelDisplayName, Message -AutoSize -Wrap | Out-String -Width 200; Write-Output \"  FINDING: $($ev.Count) WU error events in the last 30 days\"; exit 1 } else { Write-Output '  No WU error events in the last 30 days'; exit 0 }" >> "!LOGFILE!" 2>&1
 if !errorlevel! neq 0 set /a DIAG_FINDINGS+=1
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0k: Recent System Crashes - Bugchecks (BSODs) ---
-echo --- 0k: Recent Bugchecks / BSODs (last 5, past 30 days) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WER-SystemErrorReporting'; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 5 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Message -AutoSize -Wrap | Out-String -Width 200 } else { Write-Output '  No bugcheck events in the last 30 days' }" >> "%LOGFILE%" 2>&1
-echo. >> "%LOGFILE%"
+echo --- 0k: Recent Bugchecks / BSODs (last 5, past 30 days) --- >> "!LOGFILE!"
+powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WER-SystemErrorReporting'; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 5 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Message -AutoSize -Wrap | Out-String -Width 200 } else { Write-Output '  No bugcheck events in the last 30 days' }" >> "!LOGFILE!" 2>&1
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0k2: Kernel-Power (Event 41) - Unexpected Power Loss / Hard Resets ---
-echo --- 0k2: Unexpected Power Loss / Hard Resets (Event 41, last 10, past 30 days) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Kernel-Power'; Id=41; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Id, @{N='BugcheckCode';E={$_.Properties[0].Value}}, @{N='PowerButtonTimestamp';E={$_.Properties[4].Value}} -AutoSize | Out-String -Width 200; Write-Output \"  FINDING: $($ev.Count) unexpected power loss events\"; exit 1 } else { Write-Output '  No Kernel-Power Event 41 in the last 30 days'; exit 0 }" >> "%LOGFILE%" 2>&1
+echo --- 0k2: Unexpected Power Loss / Hard Resets (Event 41, last 10, past 30 days) --- >> "!LOGFILE!"
+powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Kernel-Power'; Id=41; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Id, @{N='BugcheckCode';E={$_.Properties[0].Value}}, @{N='PowerButtonTimestamp';E={$_.Properties[4].Value}} -AutoSize | Out-String -Width 200; Write-Output \"  FINDING: $($ev.Count) unexpected power loss events\"; exit 1 } else { Write-Output '  No Kernel-Power Event 41 in the last 30 days'; exit 0 }" >> "!LOGFILE!" 2>&1
 if !errorlevel! neq 0 set /a DIAG_FINDINGS+=1
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0k3: Unexpected Shutdown (Event 6008) ---
-echo --- 0k3: Unexpected/Dirty Shutdowns (Event 6008, last 10, past 30 days) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; Id=6008; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Message -AutoSize -Wrap | Out-String -Width 200; Write-Output \"  FINDING: $($ev.Count) unexpected/dirty shutdown events\"; exit 1 } else { Write-Output '  No unexpected shutdown events in the last 30 days'; exit 0 }" >> "%LOGFILE%" 2>&1
+echo --- 0k3: Unexpected/Dirty Shutdowns (Event 6008, last 10, past 30 days) --- >> "!LOGFILE!"
+powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; Id=6008; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, Message -AutoSize -Wrap | Out-String -Width 200; Write-Output \"  FINDING: $($ev.Count) unexpected/dirty shutdown events\"; exit 1 } else { Write-Output '  No unexpected shutdown events in the last 30 days'; exit 0 }" >> "!LOGFILE!" 2>&1
 if !errorlevel! neq 0 set /a DIAG_FINDINGS+=1
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0k4: Critical Events (Level 1 = Critical, any source) ---
-echo --- 0k4: All Critical System Events (last 10, past 30 days) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; Level=1; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, ProviderName, Id, Message -AutoSize -Wrap | Out-String -Width 200 } else { Write-Output '  No critical events in the last 30 days' }" >> "%LOGFILE%" 2>&1
-echo. >> "%LOGFILE%"
+echo --- 0k4: All Critical System Events (last 10, past 30 days) --- >> "!LOGFILE!"
+powershell -NoProfile -Command "$ev = Get-WinEvent -FilterHashtable @{LogName='System'; Level=1; StartTime=(Get-Date).AddDays(-30)} -MaxEvents 10 -ErrorAction SilentlyContinue; if ($ev) { $ev | Format-Table TimeCreated, ProviderName, Id, Message -AutoSize -Wrap | Out-String -Width 200 } else { Write-Output '  No critical events in the last 30 days' }" >> "!LOGFILE!" 2>&1
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0k5: Memory Dump Files ---
-echo --- 0k5: Memory Dump Files --- >> "%LOGFILE%"
-echo   --- Full Memory Dump --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$sr = $env:SystemRoot; if (Test-Path \"$sr\MEMORY.DMP\") { $f = Get-Item \"$sr\MEMORY.DMP\"; Write-Output ('  MEMORY.DMP: ' + [math]::Round($f.Length/1MB) + ' MB, Last written: ' + $f.LastWriteTime) } else { Write-Output '  MEMORY.DMP: Not found' }" >> "%LOGFILE%" 2>&1
-echo   --- Minidump Files (last 10) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "$sr = $env:SystemRoot; if (Test-Path \"$sr\Minidump\") { $dumps = Get-ChildItem \"$sr\Minidump\*.dmp\" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 10; if ($dumps) { $dumps | Format-Table Name, @{N='SizeKB';E={[math]::Round($_.Length/1KB)}}, LastWriteTime -AutoSize | Out-String -Width 200 } else { Write-Output '  Minidump folder exists but no .dmp files found' } } else { Write-Output '  Minidump folder: Not found' }" >> "%LOGFILE%" 2>&1
-echo   --- Crash Dump Settings --- >> "%LOGFILE%"
-reg query "HKLM\SYSTEM\CurrentControlSet\Control\CrashControl" /v CrashDumpEnabled >> "%LOGFILE%" 2>&1
-reg query "HKLM\SYSTEM\CurrentControlSet\Control\CrashControl" /v DumpFile >> "%LOGFILE%" 2>&1
-reg query "HKLM\SYSTEM\CurrentControlSet\Control\CrashControl" /v MinidumpDir >> "%LOGFILE%" 2>&1
-echo. >> "%LOGFILE%"
+echo --- 0k5: Memory Dump Files --- >> "!LOGFILE!"
+echo   --- Full Memory Dump --- >> "!LOGFILE!"
+powershell -NoProfile -Command "$sr = $env:SystemRoot; if (Test-Path \"$sr\MEMORY.DMP\") { $f = Get-Item \"$sr\MEMORY.DMP\"; Write-Output ('  MEMORY.DMP: ' + [math]::Round($f.Length/1MB) + ' MB, Last written: ' + $f.LastWriteTime) } else { Write-Output '  MEMORY.DMP: Not found' }" >> "!LOGFILE!" 2>&1
+echo   --- Minidump Files (last 10) --- >> "!LOGFILE!"
+powershell -NoProfile -Command "$sr = $env:SystemRoot; if (Test-Path \"$sr\Minidump\") { $dumps = Get-ChildItem \"$sr\Minidump\*.dmp\" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 10; if ($dumps) { $dumps | Format-Table Name, @{N='SizeKB';E={[math]::Round($_.Length/1KB)}}, LastWriteTime -AutoSize | Out-String -Width 200 } else { Write-Output '  Minidump folder exists but no .dmp files found' } } else { Write-Output '  Minidump folder: Not found' }" >> "!LOGFILE!" 2>&1
+echo   --- Crash Dump Settings --- >> "!LOGFILE!"
+reg query "HKLM\SYSTEM\CurrentControlSet\Control\CrashControl" /v CrashDumpEnabled >> "!LOGFILE!" 2>&1
+reg query "HKLM\SYSTEM\CurrentControlSet\Control\CrashControl" /v DumpFile >> "!LOGFILE!" 2>&1
+reg query "HKLM\SYSTEM\CurrentControlSet\Control\CrashControl" /v MinidumpDir >> "!LOGFILE!" 2>&1
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0l: Installed Updates (last 15) ---
-echo --- 0l: Recent Installed Updates --- >> "%LOGFILE%"
-powershell -NoProfile -Command "Get-HotFix -ErrorAction SilentlyContinue | Sort-Object InstalledOn -Descending | Select-Object -First 15 | Format-Table HotFixID, InstalledOn, Description -AutoSize | Out-String -Width 200" >> "%LOGFILE%" 2>&1
-echo. >> "%LOGFILE%"
+echo --- 0l: Recent Installed Updates --- >> "!LOGFILE!"
+powershell -NoProfile -Command "Get-HotFix -ErrorAction SilentlyContinue | Sort-Object InstalledOn -Descending | Select-Object -First 15 | Format-Table HotFixID, InstalledOn, Description -AutoSize | Out-String -Width 200" >> "!LOGFILE!" 2>&1
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0m: Network Configuration ---
-echo --- 0m: Network Configuration --- >> "%LOGFILE%"
-echo   --- Active Adapters --- >> "%LOGFILE%"
-powershell -NoProfile -Command "Get-NetAdapter | Where-Object Status -eq 'Up' | Select-Object Name, InterfaceDescription, Status, LinkSpeed | Format-Table -AutoSize | Out-String -Width 200" >> "%LOGFILE%" 2>&1
-echo   --- DNS Servers --- >> "%LOGFILE%"
-powershell -NoProfile -Command "Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object ServerAddresses | Select-Object InterfaceAlias, ServerAddresses | Format-Table -AutoSize | Out-String -Width 200" >> "%LOGFILE%" 2>&1
-echo   --- Proxy Settings --- >> "%LOGFILE%"
-netsh winhttp show proxy >> "%LOGFILE%" 2>&1
-reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable >> "%LOGFILE%" 2>&1
-reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyServer >> "%LOGFILE%" 2>&1
-echo. >> "%LOGFILE%"
+echo --- 0m: Network Configuration --- >> "!LOGFILE!"
+echo   --- Active Adapters --- >> "!LOGFILE!"
+powershell -NoProfile -Command "Get-NetAdapter | Where-Object Status -eq 'Up' | Select-Object Name, InterfaceDescription, Status, LinkSpeed | Format-Table -AutoSize | Out-String -Width 200" >> "!LOGFILE!" 2>&1
+echo   --- DNS Servers --- >> "!LOGFILE!"
+powershell -NoProfile -Command "Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object ServerAddresses | Select-Object InterfaceAlias, ServerAddresses | Format-Table -AutoSize | Out-String -Width 200" >> "!LOGFILE!" 2>&1
+echo   --- Proxy Settings --- >> "!LOGFILE!"
+netsh winhttp show proxy >> "!LOGFILE!" 2>&1
+reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable >> "!LOGFILE!" 2>&1
+reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyServer >> "!LOGFILE!" 2>&1
+echo. >> "!LOGFILE!"
 call :Spin
 
 :: --- 0n: CBS/DISM Log Tail (last errors) ---
-echo --- 0n: Last CBS.log Errors (last 20 error lines) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "if (Test-Path 'C:\Windows\Logs\CBS\CBS.log') { Get-Content 'C:\Windows\Logs\CBS\CBS.log' -Tail 500 | Select-String -Pattern 'Error|FAIL|corrupt' -CaseSensitive:$false | Select-Object -Last 20 | ForEach-Object { $_.Line.Trim() } } else { Write-Output '  CBS.log not found' }" >> "%LOGFILE%" 2>&1
-echo. >> "%LOGFILE%"
+echo --- 0n: Last CBS.log Errors (last 20 error lines) --- >> "!LOGFILE!"
+powershell -NoProfile -Command "$f = Join-Path $env:SystemRoot 'Logs\CBS\CBS.log'; if (Test-Path $f) { Get-Content $f -Tail 500 | Select-String -Pattern 'Error|FAIL|corrupt' -CaseSensitive:$false | Select-Object -Last 20 | ForEach-Object { $_.Line.Trim() } } else { Write-Output '  CBS.log not found' }" >> "!LOGFILE!" 2>&1
+echo. >> "!LOGFILE!"
 
-echo --- 0o: Last DISM.log Errors (last 20 error lines) --- >> "%LOGFILE%"
-powershell -NoProfile -Command "if (Test-Path 'C:\Windows\Logs\DISM\dism.log') { Get-Content 'C:\Windows\Logs\DISM\dism.log' -Tail 500 | Select-String -Pattern 'Error|FAIL|0x800' -CaseSensitive:$false | Select-Object -Last 20 | ForEach-Object { $_.Line.Trim() } } else { Write-Output '  dism.log not found' }" >> "%LOGFILE%" 2>&1
-echo. >> "%LOGFILE%"
+echo --- 0o: Last DISM.log Errors (last 20 error lines) --- >> "!LOGFILE!"
+powershell -NoProfile -Command "$f = Join-Path $env:SystemRoot 'Logs\DISM\dism.log'; if (Test-Path $f) { Get-Content $f -Tail 500 | Select-String -Pattern 'Error|FAIL|0x800' -CaseSensitive:$false | Select-Object -Last 20 | ForEach-Object { $_.Line.Trim() } } else { Write-Output '  dism.log not found' }" >> "!LOGFILE!" 2>&1
+echo. >> "!LOGFILE!"
 
 echo   Step 0 diagnostics complete.
 call :SpinDone
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 
 :: --- Stop check: if this was the target step, go to summary ---
 if /I "!_STOP_AFTER!"=="Step0" goto :StepDone
@@ -1042,18 +1063,25 @@ if /I "!_STOP_AFTER!"=="Step0" goto :StepDone
 :Step1
 echo [STEP 1] Recording original service configuration...
 call :Spin
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [STEP 1] Original Service Configuration - %TIME% >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo. >> "%LOGFILE%"
-echo   (Save this section to restore original startup types if needed) >> "%LOGFILE%"
-echo. >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [STEP 1] Original Service Configuration - %TIME% >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo. >> "!LOGFILE!"
+echo   (Save this section to restore original startup types if needed) >> "!LOGFILE!"
+echo. >> "!LOGFILE!"
 
 for %%s in (wuauserv cryptSvc bits msiserver appidsvc UsoSvc DoSvc TrustedInstaller) do (
-    echo   --- %%s --- >> "%LOGFILE%"
-    sc qc %%s 2>&1 | findstr /I "START_TYPE" >> "%LOGFILE%" 2>&1
-    sc query %%s 2>&1 | findstr /I "STATE" >> "%LOGFILE%" 2>&1
-    echo. >> "%LOGFILE%"
+    echo   --- %%s --- >> "!LOGFILE!"
+    sc qc %%s 2>&1 | findstr /I "START_TYPE" >> "!LOGFILE!" 2>&1
+    sc query %%s 2>&1 | findstr /I "STATE" >> "!LOGFILE!" 2>&1
+    call :SvcState %%s
+    call :SvcStart %%s
+    echo   %%s: state=!_SVC_STATE! start=!_SVC_START! >> "!LOGFILE!"
+    if "!_SVC_START!"=="4" for %%d in (wuauserv bits cryptSvc UsoSvc) do if "%%d"=="%%s" (
+        echo   FINDING: %%s is disabled; Windows Update fails with 0x80070422 >> "!LOGFILE!"
+        set /a DIAG_FINDINGS+=1
+    )
+    echo. >> "!LOGFILE!"
     call :Spin
 )
 
@@ -1066,24 +1094,26 @@ if /I "!_STOP_AFTER!"=="Step1" goto :StepDone
 :Step2
 echo [STEP 2] Stopping Windows Update services...
 call :Spin
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [STEP 2] Stopping Services - %TIME% >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [STEP 2] Stopping Services - %TIME% >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
 
+:: Capture every state before the first stop: net stop /y also stops dependants
 for %%s in (wuauserv UsoSvc DoSvc cryptSvc bits msiserver appidsvc TrustedInstaller) do (
-    echo   Stopping %%s... >> "%LOGFILE%"
-    net stop %%s /y >> "%LOGFILE%" 2>&1
-    if !errorlevel! neq 0 (
-        if !errorlevel! equ 2 (
-            echo     INFO: %%s was not running >> "%LOGFILE%"
-        ) else (
-            echo     WARNING: net stop %%s returned !errorlevel! >> "%LOGFILE%"
-            set /a WARN_COUNT+=1
-        )
-    )
+    call :SvcState %%s
+    set "_SVC_CAP_%%s=!_SVC_STATE!"
+)
+for %%s in (wuauserv UsoSvc DoSvc cryptSvc bits msiserver appidsvc TrustedInstaller) do (
+    echo   Stopping %%s... >> "!LOGFILE!"
+    call :StopSvc %%s
     call :Spin
 )
-echo. >> "%LOGFILE%"
+:: Remember what this run stopped, so that Step 11 starts exactly that again
+for %%s in (wuauserv UsoSvc DoSvc cryptSvc bits msiserver appidsvc TrustedInstaller) do if "!_SVC_CAP_%%s!"=="4" (
+    call :SvcState %%s
+    if "!_SVC_STATE!"=="1" if "!_STOPPED_BY_RUN: %%s =!"=="!_STOPPED_BY_RUN!" set "_STOPPED_BY_RUN=!_STOPPED_BY_RUN!%%s "
+)
+echo. >> "!LOGFILE!"
 
 call :SpinDone
 if /I "!_STOP_AFTER!"=="Step2" goto :StepDone
@@ -1094,33 +1124,33 @@ if /I "!_STOP_AFTER!"=="Step2" goto :StepDone
 :Step3
 echo [STEP 3] Deleting BITS queue data files...
 call :Spin
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [STEP 3] Delete BITS Queue Data - %TIME% >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [STEP 3] Delete BITS Queue Data - %TIME% >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
 
 if exist "%ALLUSERSPROFILE%\Application Data\Microsoft\Network\Downloader\qmgr*.dat" (
-    del /f /q "%ALLUSERSPROFILE%\Application Data\Microsoft\Network\Downloader\qmgr*.dat" >> "%LOGFILE%" 2>&1
+    del /f /q "%ALLUSERSPROFILE%\Application Data\Microsoft\Network\Downloader\qmgr*.dat" >> "!LOGFILE!" 2>&1
     if !errorlevel! neq 0 (
-        echo   WARN: Could not delete qmgr data from Application Data >> "%LOGFILE%"
+        echo   WARN: Could not delete qmgr data from Application Data >> "!LOGFILE!"
         set /a WARN_COUNT+=1
     ) else (
-        echo   Deleted qmgr data from Application Data >> "%LOGFILE%"
+        echo   Deleted qmgr data from Application Data >> "!LOGFILE!"
     )
 ) else (
-    echo   No qmgr data in Application Data ^(OK^) >> "%LOGFILE%"
+    echo   No qmgr data in Application Data ^(OK^) >> "!LOGFILE!"
 )
 if exist "%ALLUSERSPROFILE%\Microsoft\Network\Downloader\qmgr*.dat" (
-    del /f /q "%ALLUSERSPROFILE%\Microsoft\Network\Downloader\qmgr*.dat" >> "%LOGFILE%" 2>&1
+    del /f /q "%ALLUSERSPROFILE%\Microsoft\Network\Downloader\qmgr*.dat" >> "!LOGFILE!" 2>&1
     if !errorlevel! neq 0 (
-        echo   WARN: Could not delete qmgr data from ProgramData >> "%LOGFILE%"
+        echo   WARN: Could not delete qmgr data from ProgramData >> "!LOGFILE!"
         set /a WARN_COUNT+=1
     ) else (
-        echo   Deleted qmgr data from ProgramData >> "%LOGFILE%"
+        echo   Deleted qmgr data from ProgramData >> "!LOGFILE!"
     )
 ) else (
-    echo   No qmgr data in ProgramData ^(OK^) >> "%LOGFILE%"
+    echo   No qmgr data in ProgramData ^(OK^) >> "!LOGFILE!"
 )
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 
 call :SpinDone
 if /I "!_STOP_AFTER!"=="Step3" goto :StepDone
@@ -1131,9 +1161,9 @@ if /I "!_STOP_AFTER!"=="Step3" goto :StepDone
 :Step4
 echo [STEP 4] Renaming update cache folders...
 call :Spin
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [STEP 4] Renaming Cache Folders - %TIME% >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [STEP 4] Renaming Cache Folders - %TIME% >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
 
 :: Use timestamped names so previous backups are preserved
 set "SD_BAK=SoftwareDistribution.%TIMESTAMP%.bak"
@@ -1141,35 +1171,35 @@ set "CR_BAK=catroot2.%TIMESTAMP%.bak"
 
 :: Clear attributes before rename
 if exist "%SystemRoot%\SoftwareDistribution" (
-    attrib -r -s -h /s /d "%SystemRoot%\SoftwareDistribution" >> "%LOGFILE%" 2>&1
-    echo   Renaming SoftwareDistribution to %SD_BAK%... >> "%LOGFILE%"
-    ren "%SystemRoot%\SoftwareDistribution" "%SD_BAK%" >> "%LOGFILE%" 2>&1
+    attrib -r -s -h /s /d "%SystemRoot%\SoftwareDistribution" >> "!LOGFILE!" 2>&1
+    echo   Renaming SoftwareDistribution to %SD_BAK%... >> "!LOGFILE!"
+    ren "%SystemRoot%\SoftwareDistribution" "%SD_BAK%" >> "!LOGFILE!" 2>&1
     if !errorlevel! equ 0 (
-        echo   SUCCESS: SoftwareDistribution renamed >> "%LOGFILE%"
+        echo   SUCCESS: SoftwareDistribution renamed >> "!LOGFILE!"
     ) else (
-        echo   FAIL: Could not rename SoftwareDistribution >> "%LOGFILE%"
+        echo   FAIL: Could not rename SoftwareDistribution >> "!LOGFILE!"
         set /a FAIL_COUNT+=1
     )
 ) else (
-    echo   WARNING: SoftwareDistribution folder not found >> "%LOGFILE%"
+    echo   WARNING: SoftwareDistribution folder not found >> "!LOGFILE!"
     set /a WARN_COUNT+=1
 )
 
 if exist "%SystemRoot%\System32\catroot2" (
-    attrib -r -s -h /s /d "%SystemRoot%\System32\catroot2" >> "%LOGFILE%" 2>&1
-    echo   Renaming catroot2 to %CR_BAK%... >> "%LOGFILE%"
-    ren "%SystemRoot%\System32\catroot2" "%CR_BAK%" >> "%LOGFILE%" 2>&1
+    attrib -r -s -h /s /d "%SystemRoot%\System32\catroot2" >> "!LOGFILE!" 2>&1
+    echo   Renaming catroot2 to %CR_BAK%... >> "!LOGFILE!"
+    ren "%SystemRoot%\System32\catroot2" "%CR_BAK%" >> "!LOGFILE!" 2>&1
     if !errorlevel! equ 0 (
-        echo   SUCCESS: catroot2 renamed >> "%LOGFILE%"
+        echo   SUCCESS: catroot2 renamed >> "!LOGFILE!"
     ) else (
-        echo   FAIL: Could not rename catroot2 >> "%LOGFILE%"
+        echo   FAIL: Could not rename catroot2 >> "!LOGFILE!"
         set /a FAIL_COUNT+=1
     )
 ) else (
-    echo   WARNING: catroot2 folder not found >> "%LOGFILE%"
+    echo   WARNING: catroot2 folder not found >> "!LOGFILE!"
     set /a WARN_COUNT+=1
 )
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 
 call :SpinDone
 if /I "!_STOP_AFTER!"=="Step4" goto :StepDone
@@ -1180,15 +1210,18 @@ if /I "!_STOP_AFTER!"=="Step4" goto :StepDone
 :Step5
 echo [STEP 5] Resetting BITS queue...
 call :Spin
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [STEP 5] Reset BITS Queue - %TIME% >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-bitsadmin /reset /allusers >> "%LOGFILE%" 2>&1
-if !errorlevel! neq 0 (
-    echo   WARNING: bitsadmin reset returned !errorlevel! >> "%LOGFILE%"
-    set /a WARN_COUNT+=1
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [STEP 5] Reset BITS Queue - %TIME% >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+:: bitsadmin needs the BITS service. In a longer run it is stopped here, and
+:: bitsadmin would start it again, so the reset waits for Step 11.
+if /I "!_STOP_AFTER!"=="Step5" (
+    call :BitsReset
+) else (
+    set "_BITS_RESET_PENDING=1"
+    echo   BITS queue reset deferred to Step 11 ^(needs the BITS service^) >> "!LOGFILE!"
 )
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 
 call :SpinDone
 if /I "!_STOP_AFTER!"=="Step5" goto :StepDone
@@ -1201,11 +1234,11 @@ if /I "!_STOP_AFTER!"=="Step5" goto :StepDone
 :Step6
 if "!RESET_WU_POLICIES!"=="1" (
     echo [STEP 6] Exporting and resetting Windows Update policies...
-    echo ------------------------------------------------------------ >> "%LOGFILE%"
-    echo [STEP 6] WU Policy Export ^& Reset - %TIME% >> "%LOGFILE%"
-    echo ------------------------------------------------------------ >> "%LOGFILE%"
+    echo ------------------------------------------------------------ >> "!LOGFILE!"
+    echo [STEP 6] WU Policy Export ^& Reset - %TIME% >> "!LOGFILE!"
+    echo ------------------------------------------------------------ >> "!LOGFILE!"
 
-    set "POLICY_BACKUP_DIR=%DESKTOP%\WU_PolicyBackup_%TIMESTAMP%"
+    set "POLICY_BACKUP_DIR=!DESKTOP!\WU_PolicyBackup_%TIMESTAMP%"
     :: Initialize flags BEFORE mkdir so they're always defined at :Step6End
     :: POLICY_BACKUP_READY = backup dir was created successfully
     :: POLICY_EXPORTED = at least one key was found and exported (never delete backup dir)
@@ -1214,9 +1247,9 @@ if "!RESET_WU_POLICIES!"=="1" (
     set "POLICY_EXPORTED=0"
     set "POLICY_FOUND=0"
 
-    mkdir "!POLICY_BACKUP_DIR!" >> "%LOGFILE%" 2>&1
+    mkdir "!POLICY_BACKUP_DIR!" >> "!LOGFILE!" 2>&1
     if !errorlevel! neq 0 (
-        echo   FAIL: Cannot create backup directory >> "%LOGFILE%"
+        echo   FAIL: Cannot create backup directory >> "!LOGFILE!"
         set /a FAIL_COUNT+=1
         goto :Step6End
     )
@@ -1224,115 +1257,115 @@ if "!RESET_WU_POLICIES!"=="1" (
 
     reg query "HKCU\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" >nul 2>&1
     if !errorlevel! equ 0 (
-        echo   Exporting HKCU WU policy... >> "%LOGFILE%"
-        reg export "HKCU\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" "!POLICY_BACKUP_DIR!\HKCU_WU_Policy.reg" /y >> "%LOGFILE%" 2>&1
+        echo   Exporting HKCU WU policy... >> "!LOGFILE!"
+        reg export "HKCU\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" "!POLICY_BACKUP_DIR!\HKCU_WU_Policy.reg" /y >> "!LOGFILE!" 2>&1
         if !errorlevel! equ 0 (
-            reg delete "HKCU\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /f >> "%LOGFILE%" 2>&1
+            reg delete "HKCU\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /f >> "!LOGFILE!" 2>&1
             if !errorlevel! equ 0 (
                 set "POLICY_FOUND=1"
             ) else (
-                echo   WARN: reg delete HKCU WU policy failed ^(key may still exist^) >> "%LOGFILE%"
+                echo   WARN: reg delete HKCU WU policy failed ^(key may still exist^) >> "!LOGFILE!"
                 set /a WARN_COUNT+=1
             )
             set "POLICY_EXPORTED=1"
         ) else (
-            echo   FAIL: Export failed, skipping delete for safety >> "%LOGFILE%"
+            echo   FAIL: Export failed, skipping delete for safety >> "!LOGFILE!"
             set /a FAIL_COUNT+=1
         )
     ) else (
-        echo   HKCU WU policy key not present ^(OK^) >> "%LOGFILE%"
+        echo   HKCU WU policy key not present ^(OK^) >> "!LOGFILE!"
     )
 
     reg query "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" >nul 2>&1
     if !errorlevel! equ 0 (
-        echo   Exporting HKCU CV WU policy... >> "%LOGFILE%"
-        reg export "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" "!POLICY_BACKUP_DIR!\HKCU_CV_WU_Policy.reg" /y >> "%LOGFILE%" 2>&1
+        echo   Exporting HKCU CV WU policy... >> "!LOGFILE!"
+        reg export "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" "!POLICY_BACKUP_DIR!\HKCU_CV_WU_Policy.reg" /y >> "!LOGFILE!" 2>&1
         if !errorlevel! equ 0 (
-            reg delete "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" /f >> "%LOGFILE%" 2>&1
+            reg delete "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" /f >> "!LOGFILE!" 2>&1
             if !errorlevel! equ 0 (
                 set "POLICY_FOUND=1"
             ) else (
-                echo   WARN: reg delete HKCU CV WU policy failed ^(key may still exist^) >> "%LOGFILE%"
+                echo   WARN: reg delete HKCU CV WU policy failed ^(key may still exist^) >> "!LOGFILE!"
                 set /a WARN_COUNT+=1
             )
             set "POLICY_EXPORTED=1"
         ) else (
-            echo   FAIL: Export failed, skipping delete for safety >> "%LOGFILE%"
+            echo   FAIL: Export failed, skipping delete for safety >> "!LOGFILE!"
             set /a FAIL_COUNT+=1
         )
     ) else (
-        echo   HKCU CV WU policy key not present ^(OK^) >> "%LOGFILE%"
+        echo   HKCU CV WU policy key not present ^(OK^) >> "!LOGFILE!"
     )
 
     reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" >nul 2>&1
     if !errorlevel! equ 0 (
-        echo   Exporting HKLM WU policy... >> "%LOGFILE%"
-        reg export "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" "!POLICY_BACKUP_DIR!\HKLM_WU_Policy.reg" /y >> "%LOGFILE%" 2>&1
+        echo   Exporting HKLM WU policy... >> "!LOGFILE!"
+        reg export "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" "!POLICY_BACKUP_DIR!\HKLM_WU_Policy.reg" /y >> "!LOGFILE!" 2>&1
         if !errorlevel! equ 0 (
-            reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /f >> "%LOGFILE%" 2>&1
+            reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /f >> "!LOGFILE!" 2>&1
             if !errorlevel! equ 0 (
                 set "POLICY_FOUND=1"
             ) else (
-                echo   WARN: reg delete HKLM WU policy failed ^(key may still exist^) >> "%LOGFILE%"
+                echo   WARN: reg delete HKLM WU policy failed ^(key may still exist^) >> "!LOGFILE!"
                 set /a WARN_COUNT+=1
             )
             set "POLICY_EXPORTED=1"
         ) else (
-            echo   FAIL: Export failed, skipping delete for safety >> "%LOGFILE%"
+            echo   FAIL: Export failed, skipping delete for safety >> "!LOGFILE!"
             set /a FAIL_COUNT+=1
         )
     ) else (
-        echo   HKLM WU policy key not present ^(OK^) >> "%LOGFILE%"
+        echo   HKLM WU policy key not present ^(OK^) >> "!LOGFILE!"
     )
 
     reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" >nul 2>&1
     if !errorlevel! equ 0 (
-        echo   Exporting HKLM CV WU policy... >> "%LOGFILE%"
-        reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" "!POLICY_BACKUP_DIR!\HKLM_CV_WU_Policy.reg" /y >> "%LOGFILE%" 2>&1
+        echo   Exporting HKLM CV WU policy... >> "!LOGFILE!"
+        reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" "!POLICY_BACKUP_DIR!\HKLM_CV_WU_Policy.reg" /y >> "!LOGFILE!" 2>&1
         if !errorlevel! equ 0 (
-            reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" /f >> "%LOGFILE%" 2>&1
+            reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\WindowsUpdate" /f >> "!LOGFILE!" 2>&1
             if !errorlevel! equ 0 (
                 set "POLICY_FOUND=1"
             ) else (
-                echo   WARN: reg delete HKLM CV WU policy failed ^(key may still exist^) >> "%LOGFILE%"
+                echo   WARN: reg delete HKLM CV WU policy failed ^(key may still exist^) >> "!LOGFILE!"
                 set /a WARN_COUNT+=1
             )
             set "POLICY_EXPORTED=1"
         ) else (
-            echo   FAIL: Export failed, skipping delete for safety >> "%LOGFILE%"
+            echo   FAIL: Export failed, skipping delete for safety >> "!LOGFILE!"
             set /a FAIL_COUNT+=1
         )
     ) else (
-        echo   HKLM CV WU policy key not present ^(OK^) >> "%LOGFILE%"
+        echo   HKLM CV WU policy key not present ^(OK^) >> "!LOGFILE!"
     )
 
     :Step6End
     if "!POLICY_BACKUP_READY!"=="0" (
-        :: mkdir failed — already logged as FAIL, nothing more to do
-        echo   Skipping policy cleanup ^(backup directory could not be created^) >> "%LOGFILE%"
+        :: mkdir failed - already logged as FAIL, nothing more to do
+        echo   Skipping policy cleanup ^(backup directory could not be created^) >> "!LOGFILE!"
     ) else if "!POLICY_FOUND!"=="1" (
-        echo   Policy backups saved to: !POLICY_BACKUP_DIR! >> "%LOGFILE%"
-        echo   Running gpupdate... >> "%LOGFILE%"
-        gpupdate /force >> "%LOGFILE%" 2>&1
+        echo   Policy backups saved to: !POLICY_BACKUP_DIR! >> "!LOGFILE!"
+        echo   Running gpupdate... >> "!LOGFILE!"
+        gpupdate /force >> "!LOGFILE!" 2>&1
     ) else if "!POLICY_EXPORTED!"=="1" (
-        :: Keys were found and exported but delete failed — keep backup dir, skip gpupdate
-        echo   WARN: Policies were exported but deletion failed. Backup preserved at: !POLICY_BACKUP_DIR! >> "%LOGFILE%"
+        :: Keys were found and exported but delete failed - keep backup dir, skip gpupdate
+        echo   WARN: Policies were exported but deletion failed. Backup preserved at: !POLICY_BACKUP_DIR! >> "!LOGFILE!"
     ) else (
-        echo   No WU policies found - nothing to reset >> "%LOGFILE%"
-        rmdir "!POLICY_BACKUP_DIR!" >> "%LOGFILE%" 2>&1
+        echo   No WU policies found - nothing to reset >> "!LOGFILE!"
+        rmdir "!POLICY_BACKUP_DIR!" >> "!LOGFILE!" 2>&1
     )
-    echo. >> "%LOGFILE%"
+    echo. >> "!LOGFILE!"
 ) else (
     echo [STEP 6] SKIPPED - WU policy reset disabled ^(RESET_WU_POLICIES=0^)
-    echo ------------------------------------------------------------ >> "%LOGFILE%"
-    echo [STEP 6] SKIPPED - WU policy reset disabled >> "%LOGFILE%"
+    echo ------------------------------------------------------------ >> "!LOGFILE!"
+    echo [STEP 6] SKIPPED - WU policy reset disabled >> "!LOGFILE!"
     if "!_CLI_MODE!"=="1" (
-        echo   To enable: rerun with /policy flag >> "%LOGFILE%"
+        echo   To enable: rerun with /policy flag >> "!LOGFILE!"
     ) else (
-        echo   To enable: return to Main Menu and turn this option ON >> "%LOGFILE%"
+        echo   To enable: return to Main Menu and turn this option ON >> "!LOGFILE!"
     )
-    echo ------------------------------------------------------------ >> "%LOGFILE%"
-    echo. >> "%LOGFILE%"
+    echo ------------------------------------------------------------ >> "!LOGFILE!"
+    echo. >> "!LOGFILE!"
     if "!_CLI_MODE!"=="1" if /I "!_STOP_AFTER!"=="Step6" set /a WARN_COUNT+=1
 )
 
@@ -1347,47 +1380,47 @@ if /I "!_STOP_AFTER!"=="Step6" goto :StepDone
 :Step7
 if "!RESET_SERVICE_SDDL!"=="1" (
     echo [STEP 7] Backing up and resetting service security descriptors...
-    echo ------------------------------------------------------------ >> "%LOGFILE%"
-    echo [STEP 7] Service Security Descriptors - %TIME% >> "%LOGFILE%"
-    echo ------------------------------------------------------------ >> "%LOGFILE%"
+    echo ------------------------------------------------------------ >> "!LOGFILE!"
+    echo [STEP 7] Service Security Descriptors - %TIME% >> "!LOGFILE!"
+    echo ------------------------------------------------------------ >> "!LOGFILE!"
 
-    echo   --- Current BITS SDDL ^(backup - save this to restore^) --- >> "%LOGFILE%"
-    sc sdshow bits >> "%LOGFILE%" 2>&1
-    echo. >> "%LOGFILE%"
+    echo   --- Current BITS SDDL ^(backup - save this to restore^) --- >> "!LOGFILE!"
+    sc sdshow bits >> "!LOGFILE!" 2>&1
+    echo. >> "!LOGFILE!"
 
-    echo   --- Current wuauserv SDDL ^(backup - save this to restore^) --- >> "%LOGFILE%"
-    sc sdshow wuauserv >> "%LOGFILE%" 2>&1
-    echo. >> "%LOGFILE%"
+    echo   --- Current wuauserv SDDL ^(backup - save this to restore^) --- >> "!LOGFILE!"
+    sc sdshow wuauserv >> "!LOGFILE!" 2>&1
+    echo. >> "!LOGFILE!"
 
-    echo   Resetting BITS security descriptor to default... >> "%LOGFILE%"
-    sc.exe sdset bits D:^(A;CI;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY^)^(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA^)^(A;;CCLCSWLOCRRC;;;IU^)^(A;;CCLCSWLOCRRC;;;SU^) >> "%LOGFILE%" 2>&1
+    echo   Resetting BITS security descriptor to default... >> "!LOGFILE!"
+    sc.exe sdset bits D:^(A;CI;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY^)^(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA^)^(A;;CCLCSWLOCRRC;;;IU^)^(A;;CCLCSWLOCRRC;;;SU^) >> "!LOGFILE!" 2>&1
     if !errorlevel! neq 0 (
-        echo   WARNING: BITS SDDL reset failed - original preserved in log above >> "%LOGFILE%"
+        echo   WARNING: BITS SDDL reset failed - original preserved in log above >> "!LOGFILE!"
         set /a WARN_COUNT+=1
     )
 
-    echo   Resetting wuauserv security descriptor to default... >> "%LOGFILE%"
-    sc.exe sdset wuauserv D:^(A;;CCLCSWRPLORC;;;AU^)^(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA^)^(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY^) >> "%LOGFILE%" 2>&1
+    echo   Resetting wuauserv security descriptor to default... >> "!LOGFILE!"
+    sc.exe sdset wuauserv D:^(A;;CCLCSWRPLORC;;;AU^)^(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA^)^(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY^) >> "!LOGFILE!" 2>&1
     if !errorlevel! neq 0 (
-        echo   WARNING: wuauserv SDDL reset failed - original preserved in log above >> "%LOGFILE%"
+        echo   WARNING: wuauserv SDDL reset failed - original preserved in log above >> "!LOGFILE!"
         set /a WARN_COUNT+=1
     )
-    echo. >> "%LOGFILE%"
+    echo. >> "!LOGFILE!"
 ) else (
     echo [STEP 7] SKIPPED - SDDL reset disabled ^(RESET_SERVICE_SDDL=0^)
-    echo ------------------------------------------------------------ >> "%LOGFILE%"
-    echo [STEP 7] SKIPPED - Service SDDL reset disabled >> "%LOGFILE%"
+    echo ------------------------------------------------------------ >> "!LOGFILE!"
+    echo [STEP 7] SKIPPED - Service SDDL reset disabled >> "!LOGFILE!"
     if "!_CLI_MODE!"=="1" (
-        echo   To enable: rerun with /sddl flag >> "%LOGFILE%"
+        echo   To enable: rerun with /sddl flag >> "!LOGFILE!"
     ) else (
-        echo   To enable: return to Main Menu and turn this option ON >> "%LOGFILE%"
+        echo   To enable: return to Main Menu and turn this option ON >> "!LOGFILE!"
     )
-    echo   Current BITS SDDL for reference: >> "%LOGFILE%"
-    sc sdshow bits >> "%LOGFILE%" 2>&1
-    echo   Current wuauserv SDDL for reference: >> "%LOGFILE%"
-    sc sdshow wuauserv >> "%LOGFILE%" 2>&1
-    echo ------------------------------------------------------------ >> "%LOGFILE%"
-    echo. >> "%LOGFILE%"
+    echo   Current BITS SDDL for reference: >> "!LOGFILE!"
+    sc sdshow bits >> "!LOGFILE!" 2>&1
+    echo   Current wuauserv SDDL for reference: >> "!LOGFILE!"
+    sc sdshow wuauserv >> "!LOGFILE!" 2>&1
+    echo ------------------------------------------------------------ >> "!LOGFILE!"
+    echo. >> "!LOGFILE!"
     if "!_CLI_MODE!"=="1" if /I "!_STOP_AFTER!"=="Step7" set /a WARN_COUNT+=1
 )
 
@@ -1400,15 +1433,16 @@ if /I "!_STOP_AFTER!"=="Step7" goto :StepDone
 :Step8
 echo [STEP 8] Re-registering Windows Update DLLs...
 call :Spin
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [STEP 8] Re-registering DLLs - %TIME% >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [STEP 8] Re-registering DLLs - %TIME% >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
 
 :: Change to System32 directory to ensure DLLs are found
-cd /d "%windir%\system32"
+pushd "%windir%\system32"
 
 set /a DLL_OK=0
 set /a DLL_SKIP=0
+set /a DLL_INFO=0
 set /a DLL_FAIL=0
 
 for %%d in (
@@ -1423,20 +1457,16 @@ for %%d in (
 ) do (
     if exist "%windir%\system32\%%d" (
         regsvr32.exe /s %%d
-        if !errorlevel! equ 0 (
-            set /a DLL_OK+=1
-        ) else (
-            echo   FAIL: regsvr32 %%d returned error !errorlevel! >> "%LOGFILE%"
-            set /a DLL_FAIL+=1
-        )
+        call :ClassifyRegsvr32 %%d !errorlevel!
     ) else (
-        echo   SKIP: %%d not found in System32 >> "%LOGFILE%"
+        echo   SKIP: %%d not found in System32 >> "!LOGFILE!"
         set /a DLL_SKIP+=1
     )
 )
-echo   DLL Summary: !DLL_OK! registered, !DLL_SKIP! not found, !DLL_FAIL! failed >> "%LOGFILE%"
+popd
+echo   DLL Summary: !DLL_OK! registered, !DLL_SKIP! skipped, !DLL_INFO! informational, !DLL_FAIL! failed >> "!LOGFILE!"
 if !DLL_FAIL! gtr 0 set /a WARN_COUNT+=!DLL_FAIL!
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 
 call :SpinDone
 if /I "!_STOP_AFTER!"=="Step8" goto :StepDone
@@ -1447,25 +1477,25 @@ if /I "!_STOP_AFTER!"=="Step8" goto :StepDone
 :Step9
 echo [STEP 9] Resetting Winsock and proxy settings...
 call :Spin
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [STEP 9] Network Reset - %TIME% >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [STEP 9] Network Reset - %TIME% >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
 
-echo   Resetting Winsock... >> "%LOGFILE%"
-netsh winsock reset >> "%LOGFILE%" 2>&1
+echo   Resetting Winsock... >> "!LOGFILE!"
+netsh winsock reset >> "!LOGFILE!" 2>&1
 if !errorlevel! neq 0 (
-    echo   WARNING: netsh winsock reset returned !errorlevel! >> "%LOGFILE%"
+    echo   WARNING: netsh winsock reset returned !errorlevel! >> "!LOGFILE!"
     set /a WARN_COUNT+=1
 )
-echo   --- Current WinHTTP proxy (backup before reset) --- >> "%LOGFILE%"
-netsh winhttp show proxy >> "%LOGFILE%" 2>&1
-echo   Resetting WinHTTP proxy... >> "%LOGFILE%"
-netsh winhttp reset proxy >> "%LOGFILE%" 2>&1
+echo   --- Current WinHTTP proxy (backup before reset) --- >> "!LOGFILE!"
+netsh winhttp show proxy >> "!LOGFILE!" 2>&1
+echo   Resetting WinHTTP proxy... >> "!LOGFILE!"
+netsh winhttp reset proxy >> "!LOGFILE!" 2>&1
 if !errorlevel! neq 0 (
-    echo   WARNING: netsh winhttp reset proxy returned !errorlevel! >> "%LOGFILE%"
+    echo   WARNING: netsh winhttp reset proxy returned !errorlevel! >> "!LOGFILE!"
     set /a WARN_COUNT+=1
 )
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 
 call :SpinDone
 if /I "!_STOP_AFTER!"=="Step9" goto :StepDone
@@ -1476,15 +1506,15 @@ if /I "!_STOP_AFTER!"=="Step9" goto :StepDone
 :Step10
 echo [STEP 10] Flushing DNS cache...
 call :Spin
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [STEP 10] DNS Flush - %TIME% >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-ipconfig /flushdns >> "%LOGFILE%" 2>&1
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [STEP 10] DNS Flush - %TIME% >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+ipconfig /flushdns >> "!LOGFILE!" 2>&1
 if !errorlevel! neq 0 (
-    echo   WARN: DNS flush returned !errorlevel! >> "%LOGFILE%"
+    echo   WARN: DNS flush returned !errorlevel! >> "!LOGFILE!"
     set /a WARN_COUNT+=1
 )
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 
 call :SpinDone
 if /I "!_STOP_AFTER!"=="Step10" goto :StepDone
@@ -1496,24 +1526,45 @@ if /I "!_STOP_AFTER!"=="Step10" goto :StepDone
 :Step11
 echo [STEP 11] Restarting Windows Update services...
 call :Spin
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [STEP 11] Restarting Services - %TIME% >> "%LOGFILE%"
-echo   (Original startup types recorded in Step 1) >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [STEP 11] Restarting Services - %TIME% >> "!LOGFILE!"
+echo   (Original startup types recorded in Step 1) >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
 
-for %%s in (cryptSvc bits appidsvc msiserver DoSvc UsoSvc wuauserv TrustedInstaller) do (
-    echo   Starting %%s... >> "%LOGFILE%"
-    net start %%s >> "%LOGFILE%" 2>&1
-    set "_svc_erl=!errorlevel!"
-    if !_svc_erl! neq 0 if !_svc_erl! neq 2 (
-        echo     WARN: net start %%s failed ^(exit !_svc_erl!^) >> "%LOGFILE%"
-        set /a WARN_COUNT+=1
-    ) else if !_svc_erl! equ 2 (
-        echo     INFO: %%s already running >> "%LOGFILE%"
+for %%s in (cryptSvc bits DoSvc UsoSvc wuauserv) do (
+    echo   Starting %%s... >> "!LOGFILE!"
+    call :StartSvc %%s
+    call :Spin
+)
+:: On-demand services: only if this run stopped them, or appidsvc set to automatic
+:: (AppLocker machines; /step finalize does not know what was stopped)
+for %%s in (appidsvc msiserver TrustedInstaller) do (
+    set "_svc_go=0"
+    if not "!_STOPPED_BY_RUN: %%s =!"=="!_STOPPED_BY_RUN!" set "_svc_go=1"
+    if "%%s"=="appidsvc" (
+        call :SvcStart appidsvc
+        if "!_SVC_START!"=="2" set "_svc_go=1"
+    )
+    if "!_svc_go!"=="1" (
+        echo   Starting %%s... >> "!LOGFILE!"
+        call :StartSvc %%s
+    ) else (
+        echo   INFO: %%s starts on demand, not started here >> "!LOGFILE!"
     )
     call :Spin
 )
-echo. >> "%LOGFILE%"
+:: The BITS queue reset that Step 5 deferred
+if "!_BITS_RESET_PENDING!"=="1" (
+    call :SvcState bits
+    if "!_SVC_STATE!"=="4" (
+        call :BitsReset
+    ) else (
+        echo   WARN: BITS queue not reset, the BITS service is not running >> "!LOGFILE!"
+        set /a WARN_COUNT+=1
+    )
+    set "_BITS_RESET_PENDING=0"
+)
+echo. >> "!LOGFILE!"
 
 call :SpinDone
 if /I "!_STOP_AFTER!"=="Step11" goto :StepDone
@@ -1524,17 +1575,20 @@ if /I "!_STOP_AFTER!"=="Step11" goto :StepDone
 :Step12
 echo [STEP 12] Capturing post-reset service status...
 call :Spin
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [STEP 12] Post-Reset Service Status - %TIME% >> "%LOGFILE%"
-echo   (Some services like msiserver/TrustedInstaller may >> "%LOGFILE%"
-echo    legitimately be stopped - this is normal) >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [STEP 12] Post-Reset Service Status - %TIME% >> "!LOGFILE!"
+echo   (Some services like msiserver/TrustedInstaller may >> "!LOGFILE!"
+echo    legitimately be stopped - this is normal) >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
 
 for %%s in (wuauserv cryptSvc bits msiserver appidsvc UsoSvc DoSvc TrustedInstaller) do (
-    echo   %%s: >> "%LOGFILE%"
-    sc query %%s 2>&1 | findstr /I "STATE" >> "%LOGFILE%" 2>&1
-    sc qc %%s 2>&1 | findstr /I "START_TYPE" >> "%LOGFILE%" 2>&1
-    echo. >> "%LOGFILE%"
+    echo   %%s: >> "!LOGFILE!"
+    sc query %%s 2>&1 | findstr /I "STATE" >> "!LOGFILE!" 2>&1
+    sc qc %%s 2>&1 | findstr /I "START_TYPE" >> "!LOGFILE!" 2>&1
+    call :SvcState %%s
+    call :SvcStart %%s
+    echo   %%s: state=!_SVC_STATE! start=!_SVC_START! >> "!LOGFILE!"
+    echo. >> "!LOGFILE!"
 )
 
 call :SpinDone
@@ -1546,27 +1600,31 @@ if /I "!_STOP_AFTER!"=="Step12" goto :StepDone
 :Step13
 echo [STEP 13] Testing Windows Update connectivity...
 call :Spin
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [STEP 13] WU Connectivity Test - %TIME% >> "%LOGFILE%"
-echo   (NOTE: These are basic HTTPS reachability checks only. >> "%LOGFILE%"
-echo    A pass does not guarantee WU functionality; a fail >> "%LOGFILE%"
-echo    may indicate proxy, firewall, or DNS issues.) >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [STEP 13] WU Connectivity Test - %TIME% >> "!LOGFILE!"
+echo   (NOTE: These are basic reachability checks only. >> "!LOGFILE!"
+echo    A pass does not guarantee WU functionality; a fail >> "!LOGFILE!"
+echo    may indicate proxy, firewall, or DNS issues.) >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
 
 set "_conn_fail=0"
-echo   Testing connection to Microsoft Update... >> "%LOGFILE%"
-powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'https://update.microsoft.com' -UseBasicParsing -TimeoutSec 15; Write-Output \"  Status: $($r.StatusCode) - OK\"; exit 0 } catch { Write-Output \"  FAILED: $($_.Exception.Message)\"; exit 1 }" >> "%LOGFILE%" 2>&1
+echo   Testing connection to Microsoft Update... >> "!LOGFILE!"
+set "_PROBE_URI=https://fe2cr.update.microsoft.com/v6/ClientWebService/client.asmx"
+set "_PROBE_KIND=https"
+call :ProbeWU
 if !errorlevel! neq 0 set "_conn_fail=1"
 
-echo   Testing connection to Windows Update CDN... >> "%LOGFILE%"
-powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'https://download.windowsupdate.com' -UseBasicParsing -TimeoutSec 15; Write-Output \"  Status: $($r.StatusCode) - OK\"; exit 0 } catch { Write-Output \"  FAILED: $($_.Exception.Message)\"; exit 1 }" >> "%LOGFILE%" 2>&1
+echo   Testing connection to Windows Update CDN... >> "!LOGFILE!"
+set "_PROBE_URI=http://ctldl.windowsupdate.com/msdownload/update/v3/static/trustedr/en/disallowedcertstl.cab"
+set "_PROBE_KIND=http"
+call :ProbeWU
 if !errorlevel! neq 0 set "_conn_fail=1"
 
 if "!_conn_fail!"=="1" (
-    echo   FINDING: WU connectivity check failed >> "%LOGFILE%"
+    echo   FINDING: WU connectivity check failed >> "!LOGFILE!"
     set /a DIAG_FINDINGS+=1
 )
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 
 call :SpinDone
 if /I "!_STOP_AFTER!"=="Step13" goto :StepDone
@@ -1577,12 +1635,12 @@ if /I "!_STOP_AFTER!"=="Step13" goto :StepDone
 :Step14
 echo [STEP 14] Capturing current update history...
 call :Spin
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [STEP 14] Recent Update History - %TIME% >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [STEP 14] Recent Update History - %TIME% >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
 
-powershell -NoProfile -Command "Get-HotFix | Sort-Object InstalledOn -Descending -ErrorAction SilentlyContinue | Select-Object -First 10 | Format-Table HotFixID, InstalledOn, Description -AutoSize | Out-String -Width 200" >> "%LOGFILE%" 2>&1
-echo. >> "%LOGFILE%"
+powershell -NoProfile -Command "Get-HotFix | Sort-Object InstalledOn -Descending -ErrorAction SilentlyContinue | Select-Object -First 10 | Format-Table HotFixID, InstalledOn, Description -AutoSize | Out-String -Width 200" >> "!LOGFILE!" 2>&1
+echo. >> "!LOGFILE!"
 
 call :SpinDone
 goto :StepDone
@@ -1594,31 +1652,31 @@ goto :StepDone
 echo [FIX] DISM - Repairing component store...
 echo   This may take 10-30 minutes. Do not interrupt.
 call :Spin
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [FIX] DISM /Online /Cleanup-Image /RestoreHealth - %TIME% >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [FIX] DISM /Online /Cleanup-Image /RestoreHealth - %TIME% >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
 
-set "_DISM_FIX_TMP=%TEMP%\rwu_dism_fix_%RANDOM%.txt"
+set "_DISM_FIX_TMP=!TEMP!\rwu_dism_fix_%RANDOM%.txt"
 DISM /Online /Cleanup-Image /RestoreHealth > "!_DISM_FIX_TMP!" 2>&1
 set "_dism_fix_erl=!errorlevel!"
-type "!_DISM_FIX_TMP!" >> "%LOGFILE%"
-echo   DISM RestoreHealth exit code: !_dism_fix_erl! >> "%LOGFILE%"
+type "!_DISM_FIX_TMP!" >> "!LOGFILE!"
+echo   DISM RestoreHealth exit code: !_dism_fix_erl! >> "!LOGFILE!"
 if !_dism_fix_erl! neq 0 (
-    echo   FAIL: DISM RestoreHealth failed ^(exit code !_dism_fix_erl!^) >> "%LOGFILE%"
-    echo   TIP: If DISM failed, try running with a Windows ISO as source: >> "%LOGFILE%"
-    echo   DISM /Online /Cleanup-Image /RestoreHealth /Source:D:\sources >> "%LOGFILE%"
+    echo   FAIL: DISM RestoreHealth failed ^(exit code !_dism_fix_erl!^) >> "!LOGFILE!"
+    echo   TIP: If DISM failed, try running with a Windows ISO as source: >> "!LOGFILE!"
+    echo   DISM /Online /Cleanup-Image /RestoreHealth /Source:WIM:D:\sources\install.wim:1 /LimitAccess >> "!LOGFILE!"
     set /a FAIL_COUNT+=1
 ) else (
-    echo   SUCCESS: Component store repair completed >> "%LOGFILE%"
+    echo   SUCCESS: Component store repair completed >> "!LOGFILE!"
     :: Check if repairs were actually made (use /C: for literal phrase match)
     findstr /I /C:"successfully repaired" "!_DISM_FIX_TMP!" >nul 2>&1
     if !errorlevel! equ 0 (
-        echo   FINDING: DISM repaired component store corruption >> "%LOGFILE%"
+        echo   FINDING: DISM repaired component store corruption >> "!LOGFILE!"
         set /a DIAG_FINDINGS+=1
     )
 )
 del "!_DISM_FIX_TMP!" >nul 2>&1
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 
 call :SpinDone
 if /I "!_STOP_AFTER!"=="FixDISM" goto :StepDone
@@ -1630,55 +1688,55 @@ if /I "!_STOP_AFTER!"=="FixDISM" goto :StepDone
 echo [FIX] SFC - Scanning system files...
 echo   This may take 5-15 minutes. Do not interrupt.
 call :Spin
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [FIX] sfc /scannow - %TIME% >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [FIX] sfc /scannow - %TIME% >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
 
-set "_SFC_TMP=%TEMP%\rwu_sfc_%RANDOM%.txt"
+set "_SFC_TMP=!TEMP!\rwu_sfc_%RANDOM%.txt"
 sfc /scannow > "!_SFC_TMP!" 2>&1
 set "_sfc_erl=!errorlevel!"
-type "!_SFC_TMP!" >> "%LOGFILE%"
-echo   SFC exit code: !_sfc_erl! >> "%LOGFILE%"
+type "!_SFC_TMP!" >> "!LOGFILE!"
+echo   SFC exit code: !_sfc_erl! >> "!LOGFILE!"
 
 :: SFC exit codes: 0=no issues, 1=found+fixed, 2=found but couldn't fix
 :: Check exit code first, then parse output text for details
 if !_sfc_erl! neq 0 (
-    :: Non-zero exit code — SFC encountered a problem
+    :: Non-zero exit code - SFC encountered a problem
     findstr /I /C:"found corrupt files" "!_SFC_TMP!" >nul 2>&1
     if !errorlevel! equ 0 (
         findstr /I /C:"unable to fix" "!_SFC_TMP!" >nul 2>&1
         if !errorlevel! equ 0 (
-            echo   FAIL: SFC found corrupt files but could not fix all of them >> "%LOGFILE%"
-            echo   TIP: Run DISM /RestoreHealth first, then re-run SFC >> "%LOGFILE%"
+            echo   FAIL: SFC found corrupt files but could not fix all of them >> "!LOGFILE!"
+            echo   TIP: Run DISM /RestoreHealth first, then re-run SFC >> "!LOGFILE!"
             set /a FAIL_COUNT+=1
         ) else (
-            echo   FINDING: SFC found and repaired corrupt system files >> "%LOGFILE%"
+            echo   FINDING: SFC found and repaired corrupt system files >> "!LOGFILE!"
             set /a DIAG_FINDINGS+=1
         )
     ) else (
-        echo   FAIL: SFC returned exit code !_sfc_erl! >> "%LOGFILE%"
+        echo   FAIL: SFC returned exit code !_sfc_erl! >> "!LOGFILE!"
         set /a FAIL_COUNT+=1
     )
 ) else (
-    :: Zero exit code — check output text for confirmation
+    :: Zero exit code - check output text for confirmation
     findstr /I /C:"did not find any integrity violations" "!_SFC_TMP!" >nul 2>&1
     if !errorlevel! equ 0 (
-        echo   OK: No integrity violations found >> "%LOGFILE%"
+        echo   OK: No integrity violations found >> "!LOGFILE!"
     ) else (
         findstr /I /C:"found corrupt files" "!_SFC_TMP!" >nul 2>&1
         if !errorlevel! equ 0 (
-            echo   FINDING: SFC found and repaired corrupt system files >> "%LOGFILE%"
+            echo   FINDING: SFC found and repaired corrupt system files >> "!LOGFILE!"
             set /a DIAG_FINDINGS+=1
         ) else (
-            echo   OK: SFC completed with exit code 0 >> "%LOGFILE%"
+            echo   OK: SFC completed with exit code 0 >> "!LOGFILE!"
         )
     )
 )
 
 :: Capture relevant CBS.log tail for context
-echo   --- Last CBS.log entries after SFC --- >> "%LOGFILE%"
-powershell -NoProfile -Command "if (Test-Path 'C:\Windows\Logs\CBS\CBS.log') { Get-Content 'C:\Windows\Logs\CBS\CBS.log' -Tail 200 | Select-String -Pattern 'Verify complete|Cannot repair|Corrupt|Hashes for' -CaseSensitive:$false | Select-Object -Last 10 | ForEach-Object { $_.Line.Trim() } } else { Write-Output '  CBS.log not found' }" >> "%LOGFILE%" 2>&1
-echo. >> "%LOGFILE%"
+echo   --- Last CBS.log entries after SFC --- >> "!LOGFILE!"
+powershell -NoProfile -Command "$f = Join-Path $env:SystemRoot 'Logs\CBS\CBS.log'; if (Test-Path $f) { Get-Content $f -Tail 200 | Select-String -Pattern 'Verify complete|Cannot repair|Corrupt|Hashes for' -CaseSensitive:$false | Select-Object -Last 10 | ForEach-Object { $_.Line.Trim() } } else { Write-Output '  CBS.log not found' }" >> "!LOGFILE!" 2>&1
+echo. >> "!LOGFILE!"
 
 del "!_SFC_TMP!" >nul 2>&1
 
@@ -1689,9 +1747,9 @@ if /I "!_STOP_AFTER!"=="FixSFC" goto :StepDone
 :: SYSTEM FIX: CHKDSK - Schedule Disk Check
 :: -----------------------------------------------
 :FixCHKDSK
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [FIX] CHKDSK - Schedule Disk Check - %TIME% >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [FIX] CHKDSK - Schedule Disk Check - %TIME% >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
 
 :: Interactive mode gets a confirmation prompt; CLI skips it
 if "!_CLI_MODE!"=="1" goto :FixCHKDSK_Run
@@ -1714,7 +1772,7 @@ echo.
 call :Choice /C:YN /N /M "  Schedule CHKDSK on next reboot? [Y/N]: "
 if not defined _AUTOKEYS set "_erl=!errorlevel!"
 if !_erl!==2 (
-    echo   CHKDSK scheduling cancelled by user >> "%LOGFILE%"
+    echo   CHKDSK scheduling cancelled by user >> "!LOGFILE!"
     echo   Cancelled.
     call :SpinDone
     goto :StepDone
@@ -1725,22 +1783,22 @@ echo [FIX] CHKDSK - Scheduling disk check...
 call :Spin
 
 :: Log current disk health first
-echo   --- Current disk status --- >> "%LOGFILE%"
-powershell -NoProfile -Command "Get-Volume -DriveLetter C -ErrorAction SilentlyContinue | Select-Object DriveLetter, FileSystem, HealthStatus, @{N='SizeGB';E={[math]::Round($_.Size/1GB,1)}}, @{N='FreeGB';E={[math]::Round($_.SizeRemaining/1GB,1)}} | Format-List" >> "%LOGFILE%" 2>&1
+echo   --- Current disk status --- >> "!LOGFILE!"
+powershell -NoProfile -Command "Get-Volume -DriveLetter C -ErrorAction SilentlyContinue | Select-Object DriveLetter, FileSystem, HealthStatus, @{N='SizeGB';E={[math]::Round($_.Size/1GB,1)}}, @{N='FreeGB';E={[math]::Round($_.SizeRemaining/1GB,1)}} | Format-List" >> "!LOGFILE!" 2>&1
 
-echo   Scheduling chkdsk C: /f /r ... >> "%LOGFILE%"
-echo Y | chkdsk C: /f /r >> "%LOGFILE%" 2>&1
+echo   Scheduling chkdsk C: /f /r ... >> "!LOGFILE!"
+echo Y | chkdsk C: /f /r >> "!LOGFILE!" 2>&1
 set "_chk_erl=!errorlevel!"
-echo   CHKDSK exit code: !_chk_erl! >> "%LOGFILE%"
+echo   CHKDSK exit code: !_chk_erl! >> "!LOGFILE!"
 
 if !_chk_erl! neq 0 (
     :: chkdsk returns non-zero when it schedules for reboot - this is expected
-    echo   INFO: CHKDSK scheduled for next reboot >> "%LOGFILE%"
-    echo   Reboot your computer to begin the disk check. >> "%LOGFILE%"
+    echo   INFO: CHKDSK scheduled for next reboot >> "!LOGFILE!"
+    echo   Reboot your computer to begin the disk check. >> "!LOGFILE!"
 ) else (
-    echo   INFO: CHKDSK completed or scheduled >> "%LOGFILE%"
+    echo   INFO: CHKDSK completed or scheduled >> "!LOGFILE!"
 )
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 
 call :SpinDone
 if /I "!_STOP_AFTER!"=="FixCHKDSK" goto :StepDone
@@ -1751,23 +1809,23 @@ if /I "!_STOP_AFTER!"=="FixCHKDSK" goto :StepDone
 :FixProxy
 echo [FIX] Resetting WinHTTP proxy settings...
 call :Spin
-echo ------------------------------------------------------------ >> "%LOGFILE%"
-echo [FIX] Reset WinHTTP Proxy - %TIME% >> "%LOGFILE%"
-echo ------------------------------------------------------------ >> "%LOGFILE%"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
+echo [FIX] Reset WinHTTP Proxy - %TIME% >> "!LOGFILE!"
+echo ------------------------------------------------------------ >> "!LOGFILE!"
 
-echo   --- Current WinHTTP proxy (before reset) --- >> "%LOGFILE%"
-netsh winhttp show proxy >> "%LOGFILE%" 2>&1
-echo. >> "%LOGFILE%"
+echo   --- Current WinHTTP proxy (before reset) --- >> "!LOGFILE!"
+netsh winhttp show proxy >> "!LOGFILE!" 2>&1
+echo. >> "!LOGFILE!"
 
-echo   Resetting WinHTTP proxy to direct... >> "%LOGFILE%"
-netsh winhttp reset proxy >> "%LOGFILE%" 2>&1
+echo   Resetting WinHTTP proxy to direct... >> "!LOGFILE!"
+netsh winhttp reset proxy >> "!LOGFILE!" 2>&1
 if !errorlevel! neq 0 (
-    echo   WARNING: netsh winhttp reset proxy returned !errorlevel! >> "%LOGFILE%"
+    echo   WARNING: netsh winhttp reset proxy returned !errorlevel! >> "!LOGFILE!"
     set /a WARN_COUNT+=1
 ) else (
-    echo   SUCCESS: WinHTTP proxy reset to direct connection >> "%LOGFILE%"
+    echo   SUCCESS: WinHTTP proxy reset to direct connection >> "!LOGFILE!"
 )
-echo. >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
 
 call :SpinDone
 if /I "!_STOP_AFTER!"=="FixProxy" goto :StepDone
@@ -1810,23 +1868,23 @@ exit /b
 :StepDone
 call :Trace "entering :StepDone"
 if not "!_CLI_MODE!"=="1" call :BlankScreen
-echo ============================================================ >> "%LOGFILE%"
+echo ============================================================ >> "!LOGFILE!"
 if !FAIL_COUNT! gtr 0 (
-    echo  COMPLETED WITH ERRORS: %DATE% %TIME% >> "%LOGFILE%"
-    echo  Critical failures: !FAIL_COUNT! >> "%LOGFILE%"
-    echo  Warnings: !WARN_COUNT! >> "%LOGFILE%"
+    echo  COMPLETED WITH ERRORS: %DATE% %TIME% >> "!LOGFILE!"
+    echo  Critical failures: !FAIL_COUNT! >> "!LOGFILE!"
+    echo  Warnings: !WARN_COUNT! >> "!LOGFILE!"
 ) else if !WARN_COUNT! gtr 0 (
-    echo  COMPLETED WITH WARNINGS: %DATE% %TIME% >> "%LOGFILE%"
-    echo  Warnings: !WARN_COUNT! >> "%LOGFILE%"
+    echo  COMPLETED WITH WARNINGS: %DATE% %TIME% >> "!LOGFILE!"
+    echo  Warnings: !WARN_COUNT! >> "!LOGFILE!"
 ) else (
-    echo  COMPLETED SUCCESSFULLY: %DATE% %TIME% >> "%LOGFILE%"
+    echo  COMPLETED SUCCESSFULLY: %DATE% %TIME% >> "!LOGFILE!"
 )
 if !DIAG_FINDINGS! gtr 0 (
-    echo  Diagnostic findings: !DIAG_FINDINGS! ^(review log for FINDING lines^) >> "%LOGFILE%"
+    echo  Diagnostic findings: !DIAG_FINDINGS! ^(review log for FINDING lines^) >> "!LOGFILE!"
 )
-echo. >> "%LOGFILE%"
-echo  Log: %LOGFILE% >> "%LOGFILE%"
-echo ============================================================ >> "%LOGFILE%"
+echo. >> "!LOGFILE!"
+echo  Log: !LOGFILE! >> "!LOGFILE!"
+echo ============================================================ >> "!LOGFILE!"
 
 echo.
 echo  ================================================================
@@ -1843,7 +1901,7 @@ if !DIAG_FINDINGS! gtr 0 (
     echo  !DIAG_FINDINGS! diagnostic findings detected. Review log for details.
 )
 echo.
-echo  Log saved to: %LOGFILE%
+echo  Log saved to: !LOGFILE!
 if /I not "!_STOP_AFTER!"=="Step0" (
     echo.
     echo  ** If repair actions were performed, reboot is recommended **
@@ -1904,6 +1962,138 @@ if !_erl!==1 (
 )
 
 endlocal
+exit /b 0
+
+:: -----------------------------------------------
+:: SERVICE SUBROUTINES
+:: -----------------------------------------------
+
+:SvcState
+:: Set _SVC_STATE to the Windows state number 1-7, 0 = not installed, U = unknown.
+:: Only the state line has ": <digit>  <name>" in every display language.
+set "_SVC_STATE=U"
+sc query %1 >nul 2>&1
+set "_svc_rc=!errorlevel!"
+if "!_svc_rc!"=="1060" set "_SVC_STATE=0"
+if not "!_svc_rc!"=="0" exit /b 0
+for /f "tokens=2 delims=:" %%a in ('sc query %1 2^>nul ^| findstr /R /C:": [1-7]  [^(]"') do if "!_SVC_STATE!"=="U" for /f %%b in ("%%a") do set "_SVC_STATE=%%b"
+exit /b 0
+
+:SvcStart
+:: Set _SVC_START to the registry Start value (2 auto, 3 demand, 4 disabled), U = absent.
+set "_SVC_START=U"
+for /f "tokens=3" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Services\%1" /v Start 2^>nul ^| findstr "REG_DWORD"') do set /a "_SVC_START=%%a"
+exit /b 0
+
+:SvcPoll
+:: Query service %1; while it is in pending state %2, wait 1 s and query again, at most 5 times.
+:: ping, because timeout fails when stdin is redirected.
+call :SvcState %1
+for /l %%n in (1,1,5) do if "!_SVC_STATE!"=="%2" (
+    ping -n 2 127.0.0.1 >nul 2>&1
+    call :SvcState %1
+)
+exit /b 0
+
+:StopSvc
+:: Stop service %1 and judge the result by its state, not by the net exit code.
+if "!_SVC_CAP_%1!"=="0" (
+    echo     INFO: %1 is not installed >> "!LOGFILE!"
+    exit /b 0
+)
+call :SvcState %1
+if "!_SVC_STATE!"=="1" (
+    echo     INFO: %1 already stopped >> "!LOGFILE!"
+    exit /b 0
+)
+net stop %1 /y >> "!LOGFILE!" 2>&1
+set "_net_rc=!errorlevel!"
+call :SvcPoll %1 3
+if "!_SVC_STATE!"=="1" (
+    echo     OK: %1 stopped >> "!LOGFILE!"
+    exit /b 0
+)
+if "!_SVC_STATE!"=="4" for %%p in (DoSvc appidsvc) do if /I "%%p"=="%1" (
+    echo     INFO: %1 is protected by Windows and refused the stop >> "!LOGFILE!"
+    exit /b 0
+)
+echo     WARN: %1 did not stop ^(net stop exit !_net_rc!, state !_SVC_STATE!^) >> "!LOGFILE!"
+set /a WARN_COUNT+=1
+exit /b 0
+
+:StartSvc
+:: Start service %1 and judge the result by its state, not by the net exit code.
+call :SvcState %1
+if "!_SVC_STATE!"=="0" (
+    echo     INFO: %1 is not installed >> "!LOGFILE!"
+    exit /b 0
+)
+if "!_SVC_STATE!"=="4" (
+    echo     INFO: %1 already running >> "!LOGFILE!"
+    exit /b 0
+)
+call :SvcStart %1
+if "!_SVC_START!"=="4" goto :StartSvcDisabled
+net start %1 >> "!LOGFILE!" 2>&1
+set "_net_rc=!errorlevel!"
+call :SvcPoll %1 2
+if "!_SVC_STATE!"=="4" (
+    echo     OK: %1 is running >> "!LOGFILE!"
+    set "_STOPPED_BY_RUN=!_STOPPED_BY_RUN: %1 = !"
+    exit /b 0
+)
+echo     WARN: %1 did not start ^(net start exit !_net_rc!, state !_SVC_STATE!^) >> "!LOGFILE!"
+set /a WARN_COUNT+=1
+exit /b 0
+:StartSvcDisabled
+:: A disabled service is reported, never re-enabled: someone may have disabled it on purpose.
+set "_svc_type="
+if /I "%1"=="wuauserv" set "_svc_type=demand"
+if /I "%1"=="bits" set "_svc_type=demand"
+if /I "%1"=="cryptSvc" set "_svc_type=auto"
+if /I "%1"=="UsoSvc" set "_svc_type=delayed-auto"
+if not defined _svc_type (
+    echo     INFO: %1 is disabled, not started >> "!LOGFILE!"
+    exit /b 0
+)
+echo     WARN: %1 is disabled; Windows Update fails with 0x80070422 >> "!LOGFILE!"
+echo     To enable it: sc config %1 start= !_svc_type! >> "!LOGFILE!"
+set /a WARN_COUNT+=1
+exit /b 0
+
+:ClassifyRegsvr32
+:: Count regsvr32 exit code %2 for DLL %1. 4 = no DllRegisterServer export and
+:: 5 = its keys are owned by TrustedInstaller; both are normal on current Windows.
+if "%2"=="0" (
+    set /a DLL_OK+=1
+) else if "%2"=="4" (
+    echo   SKIP: %1 has no registration entry point ^(exit 4^) >> "!LOGFILE!"
+    set /a DLL_SKIP+=1
+) else if "%2"=="5" (
+    echo   INFO: regsvr32 %1 returned 5, its keys are protected by Windows >> "!LOGFILE!"
+    set /a DLL_INFO+=1
+) else (
+    echo   FAIL: regsvr32 %1 returned error %2 >> "!LOGFILE!"
+    set /a DLL_FAIL+=1
+)
+exit /b 0
+
+:ProbeWU
+:: GET _PROBE_URI once, again only when nothing answered (3 attempts, 15 s each).
+:: https passes on status 200 and a certificate issued by Microsoft Corporation, so a
+:: TLS-inspecting proxy fails. http passes on status 200 and a non-HTML body, so a captive
+:: portal fails. Returns 0 = pass.
+powershell -NoProfile -Command "$k=$env:_PROBE_KIND;[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor 3072;for($n=1;$n -le 3;$n++){$r=$null;$e=$null;try{$q=[Net.WebRequest]::Create($env:_PROBE_URI);$q.AllowAutoRedirect=$false;$q.KeepAlive=$false;$q.Timeout=15000;$r=$q.GetResponse()}catch{$e=$_.Exception;while($e.InnerException -and $e -isnot [Net.WebException]){$e=$e.InnerException};$r=$e.Response};if($r){$s=[int]$r.StatusCode;if($k -eq 'http'){$t=$r.ContentType;$ok=$s -eq 200 -and $t -notmatch 'text/html';$d='content type: '+$t}else{$c=$q.ServicePoint.Certificate;$i='';if($c){$i=$c.Issuer};$ok=$s -eq 200 -and $i -cmatch '(^|, )O=Microsoft Corporation(,|$)';$d='certificate issuer: '+$i};$r.Close();$v='FAILED';if($ok){$v='OK'};'  Status: '+$s+' - '+$v+' - '+$d;if($ok){exit 0};exit 1};'  Attempt '+$n+' of 3 FAILED: '+$e.Status+' - '+$e.Message;if($e.Status -eq 'TrustFailure'){break}};exit 1" >> "!LOGFILE!" 2>&1
+exit /b !errorlevel!
+
+:BitsReset
+:: Cancel the transfer jobs of all users. Needs the BITS service.
+bitsadmin /reset /allusers >> "!LOGFILE!" 2>&1
+set "_bits_rc=!errorlevel!"
+if not "!_bits_rc!"=="0" (
+    echo   WARN: bitsadmin reset returned !_bits_rc! >> "!LOGFILE!"
+    set /a WARN_COUNT+=1
+)
 exit /b 0
 
 :: -----------------------------------------------

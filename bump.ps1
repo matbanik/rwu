@@ -30,6 +30,15 @@ param(
 $ErrorActionPreference = "Stop"
 $ScriptFile = "Reset_WindowsUpdate.cmd"
 
+# Runs git and stops the script at the first failure.
+function Invoke-Git {
+    git @args
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: git $($args[0]) failed with exit code $LASTEXITCODE. Nothing further was done." -ForegroundColor Red
+        exit 1
+    }
+}
+
 # --- Validate working directory ---
 if (-not (Test-Path $ScriptFile)) {
     Write-Host "ERROR: $ScriptFile not found. Run from the repo root." -ForegroundColor Red
@@ -46,7 +55,7 @@ if ($content -match 'set "ver=(\d+\.\d+\.\d+)"') {
 }
 
 if ($oldVersion -eq $Version) {
-    Write-Host "Version is already $Version — nothing to do." -ForegroundColor Yellow
+    Write-Host "Version is already $Version - nothing to do." -ForegroundColor Yellow
     exit 0
 }
 
@@ -58,6 +67,19 @@ Write-Host ""
 Write-Host "  Current:  v$oldVersion" -ForegroundColor DarkGray
 Write-Host "  New:      v$Version" -ForegroundColor Green
 Write-Host ""
+
+# --- Check signing settings (before any file change) ---
+$signing = [ordered]@{
+    'commit.gpgsign'  = (git config --type=bool --get commit.gpgsign) -eq 'true'
+    'tag.gpgsign'     = (git config --type=bool --get tag.gpgsign) -eq 'true'
+    'gpg.format'      = (git config --get gpg.format) -ceq 'ssh'
+    'user.signingkey' = [bool](git config --get user.signingkey)
+}
+$missing = @($signing.Keys | Where-Object { -not $signing[$_] })
+if ($missing) {
+    Write-Host "ERROR: Commits and tags must be SSH-signed. Check these git settings: $($missing -join ', ')" -ForegroundColor Red
+    exit 1
+}
 
 # --- Update version in script ---
 $newContent = $content -replace 'set "ver=\d+\.\d+\.\d+"', "set `"ver=$Version`""
@@ -75,7 +97,7 @@ Write-Host "  Updated $ScriptFile" -ForegroundColor Green
 $tag = "v$Version"
 
 # Check for clean working tree (except our change)
-$status = git status --porcelain
+$status = Invoke-Git status --porcelain
 $otherChanges = $status | Where-Object { $_ -notmatch [regex]::Escape($ScriptFile) }
 if ($otherChanges) {
     Write-Host ""
@@ -91,8 +113,8 @@ if ($otherChanges) {
 }
 
 # Stage, commit, tag
-git add -A
-git commit -m "bump: v$Version"
+Invoke-Git add -A
+Invoke-Git commit -m "bump: v$Version"
 
 if ($NoPush) {
     Write-Host ""
@@ -104,13 +126,13 @@ if ($NoPush) {
 }
 
 # Tag and push
-git tag -a $tag -m "Release $tag"
+Invoke-Git tag -a $tag -m "Release $tag"
 Write-Host "  Tagged: $tag" -ForegroundColor Green
 
-git push origin main --tags
+Invoke-Git push origin main --tags
 Write-Host ""
 Write-Host "  ================================================================" -ForegroundColor Cyan
-Write-Host "  Pushed $tag — GitHub Actions will create the release." -ForegroundColor Green
+Write-Host "  Pushed $tag - GitHub Actions will create the release." -ForegroundColor Green
 Write-Host "  https://github.com/matbanik/rwu/actions" -ForegroundColor DarkGray
 Write-Host "  ================================================================" -ForegroundColor Cyan
 Write-Host ""

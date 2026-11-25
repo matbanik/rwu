@@ -19,10 +19,10 @@
 **Yes, with caveats.** Windows 10 mainstream support ended October 14, 2025. The tool still resets Windows Update components on Win10, but:
 
 - **Without ESU enrollment**, you will not receive new security updates regardless of whether the reset succeeds
-- **With ESU (Extended Security Updates)**, the tool works normally — your update pipeline is still active
+- **With active ESU (Extended Security Updates)**, the tool works normally — your update pipeline is still active
 - **LTSC/IoT Enterprise editions** have their own support lifecycles (LTSC 2021 is supported until 2027) and are unaffected
 
-> **Our policy:** We support Windows 10 until October 2026. After that, the tool will display a deprecation notice but will not hard-block execution.
+> **Our policy:** We supported Windows 10 until October 2026. Consumer ESU ended on October 13, 2026; commercial ESU may still apply. The tool does not block execution on Windows 10.
 
 ---
 
@@ -90,7 +90,7 @@ These backups remain on disk. After the reset, Windows Update will re-download a
 |---|---|---|
 | `0x80070002` / `0x80070003` | Update files missing or path not found | ✅ Yes — cache reset resolves |
 | `0x800f0922` | Insufficient disk space or System Reserved too small | ⚠️ Partially — detects component store issues (run `DISM /RestoreHealth` manually to repair), does not fix disk space |
-| `0x80070422` | Windows Update service is disabled or stopped | ✅ Yes — service restart in Steps 1–2 |
+| `0x80070422` | Windows Update service is disabled or stopped | ⚠️ Partially — restarts a stopped service, and detects and reports a disabled service, but does not re-enable it (the log gives the `sc config` command) |
 | `0x80070020` | Another process blocking WU (usually AV) | ⚠️ Partially — identifies the conflict, but you must disable the blocker |
 | `0x800705b4` | Update timed out or was interrupted | ✅ Yes — full reset clears stale state |
 | `0x80073712` | Corrupted component store | ⚠️ Partially — cache reset + DLL re-registration resolve most cases; severe corruption may require `DISM /Online /Cleanup-Image /RestoreHealth` |
@@ -105,7 +105,7 @@ These backups remain on disk. After the reset, Windows Update will re-download a
 
 **No, no, and no.**
 
-- **The tool** (`Reset_WindowsUpdate.cmd`) makes **no network calls** except the Windows Update connectivity test in Step 13 (which contacts `update.microsoft.com`)
+- **The tool** (`Reset_WindowsUpdate.cmd`) makes **no network calls** except the Windows Update connectivity test in Step 13 (which contacts `fe2cr.update.microsoft.com` over HTTPS and `ctldl.windowsupdate.com` over HTTP)
 - **The launcher** (`rwu.ps1`, used by the `irm | iex` one-liner) connects to the GitHub API to download the tool and verify its SHA256 hash — it does not run without a verified release
 - **No binaries installed** — it's a single `.cmd` script
 - **No telemetry** — no usage data is collected or transmitted

@@ -1,9 +1,9 @@
-# RWU — Windows Update Reset & Repair Tool (PowerShell Launcher)
+# RWU - Windows Update Reset & Repair Tool (PowerShell Launcher)
 # Usage: irm https://matbanik.info/rwu | iex
 # Source: https://github.com/matbanik/rwu
 #
-# This launcher fetches the latest Release asset (not raw.githubusercontent.com)
-# to avoid GitHub's unauthenticated rate limits on raw URLs (May 2025 change).
+# This launcher fetches the latest Release asset only. There is no raw-URL fallback:
+# a release without the asset or without its SHA256 is an error.
 #
 # Debug mode: set $env:RWU_DEBUG=1 before running. Uses /k (window stays open),
 # passes /debug to the batch script, and preserves temp files for inspection.
@@ -17,10 +17,13 @@ $debug = $env:RWU_DEBUG -eq '1'
 
 Write-Host ""
 Write-Host "  ================================================================" -ForegroundColor Cyan
-Write-Host "  RWU — Windows Update Reset & Repair Tool" -ForegroundColor Cyan
+Write-Host "  RWU - Windows Update Reset & Repair Tool" -ForegroundColor Cyan
 Write-Host "  https://github.com/$repo" -ForegroundColor DarkGray
 Write-Host "  ================================================================" -ForegroundColor Cyan
 Write-Host ""
+
+# Windows PowerShell 5.1 may not offer TLS 1.2, which GitHub requires
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 try {
     # Fetch latest release asset URL from GitHub API (Releases are rate-limit safe)
@@ -31,15 +34,16 @@ try {
         # Extract pinned SHA256 from release body (format: SHA256: <64-hex-chars>)
         $pinnedHash = $null
         if ($release.body -match '(?i)SHA256:\s*([0-9A-Fa-f]{64})') { $pinnedHash = $Matches[1].ToUpper() }
-        if (-not $url) {
-            # Fallback: use the source tree from the tag
-            $tag = $release.tag_name
-            $url = "https://raw.githubusercontent.com/$repo/$tag/$asset"
-        }
         Write-Host "  Version: $($release.tag_name)" -ForegroundColor Gray
     } catch {
         Write-Host "  ERROR: No releases found on GitHub." -ForegroundColor Red
         Write-Host "  The launcher requires a published release with a SHA256 checksum." -ForegroundColor Red
+        Write-Host "  Download manually from: https://github.com/$repo/releases" -ForegroundColor Yellow
+        return
+    }
+
+    if (-not $url) {
+        Write-Host "  ERROR: The release has no $asset file." -ForegroundColor Red
         Write-Host "  Download manually from: https://github.com/$repo/releases" -ForegroundColor Yellow
         return
     }
